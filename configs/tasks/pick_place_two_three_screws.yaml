@@ -1,0 +1,5 @@
+task: "pick up the screws and place them into the plastic box"
+type: "long_horizon_task"
+sub_tasks:
+  - "pick up the screws from the desk"
+  - "place the screws into the plastic box"

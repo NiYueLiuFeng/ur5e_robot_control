@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ur5e-robot-control"
+version = "0.1.0"
+description = "UR5e GELLO teleoperation, data collection, and VLA inference control"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "MIT"
+authors = [
+    { name = "Philipp Wu" },
+    { name = "Chop Intelligence" },
+]
+dependencies = [
+    "lerobot>=0.4.0",
+    "msgpack",
+    "numpy",
+    "pynput",
+    "opencv-python-headless",
+    "pyrealsense2",
+    "pyyaml",
+    "pyzmq",
+    "tyro",
+    "ur-rtde",
+    "websockets",
+]
+
+[project.optional-dependencies]
+spacemouse = [
+    "dm-control",
+    "numpy-quaternion",
+    "pyspacemouse",
+]
+
+[project.scripts]
+calibrate-gello = "apps.calibrate_gello:entrypoint"
+calibrate-cameras = "apps.calibrate_cameras:main"
+calibrate-safety-zone = "apps.calibrate_safety_zone:main"
+check-cameras = "apps.check_cameras:main"
+check-recording-ready = "apps.check_recording_ready:main"
+record-teleop = "apps.record_teleop:main"
+run-vla-inference = "apps.run_vla_inference:main"
+
+[dependency-groups]
+dev = [
+    "autoflake",
+    "black",
+    "flake8",
+    "flake8-bugbear",
+    "flake8-comprehensions",
+    "flake8-docstrings",
+    "flake8-simplify",
+    "ipdb",
+    "isort",
+    "jupyterlab",
+    "mypy",
+    "nbstripout",
+    "neovim",
+    "pre-commit",
+    "pyright",
+    "pytest",
+    "python-lsp-server[all]",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["apps*", "ur5e_control*"]
+
+[tool.black]
+line-length = 88
+
+[tool.isort]
+ensure_newline_before_comments = true
+include_trailing_comma = true
+line_length = 88
+multi_line_output = 3
+use_parentheses = true
+
+[tool.mypy]
+exclude = ["third_party/"]
+ignore_missing_imports = true
+namespace_packages = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["dynamixel_sdk.*"]
+ignore_missing_imports = true

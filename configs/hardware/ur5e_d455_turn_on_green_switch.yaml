@@ -1,0 +1,89 @@
+robot:
+  name: ur5e
+  ip: "192.168.56.2"
+  zmq_host: "127.0.0.1"
+  zmq_port: 6001
+  control_hz: 100
+  reset_joints: [1.56, -1.57, 1.58, -1.58, -1.57, -0.0077, 1000.0]
+
+# agent:
+#   name: gello
+#   robot: ur5
+#   gello_port: "/dev/ttyUSB1"
+#   verbose: false
+#   spacemouse:
+#     device_path:
+#     translation_scale: 0.06
+#     angle_scale: 0.24
+#     invert_control: [1, 1, 1, 1, 1, 1]
+#     rotation_mode: euler
+#     invert_button: false
+#     gripper_open: 1000
+#     gripper_closed: 0
+
+
+agent:
+  name: spacemouse
+  robot: ur5
+  verbose: true
+  spacemouse:
+    device_path:
+    translation_scale: 0.03
+    angle_scale: 0.09
+    invert_control: [1, 1, 1, 1, 1, 1]
+    rotation_mode: euler
+    invert_button: false
+    gripper_open: 1000
+    gripper_closed: 0
+
+
+camera:
+  hostname: "127.0.0.1"
+  fps: 30
+  enable_depth: false
+  calibration_dir: "configs/cameras"
+  realsense_ids:
+    "353522301461": third_left_top
+    "333422304095": wrist
+  intrinsics_files:
+    third_left_top: "configs/cameras/intrinsics_third_left_top.yaml"
+    wrist: "configs/cameras/intrinsics_wrist.yaml"
+  extrinsics_file: "configs/cameras/extrinsics.yaml"
+
+gripper:
+  type: dh_pgc_140_50
+  port: "/dev/ttyUSB0"
+  position_tolerance: 10
+  min_command_interval_s: 0.05
+  position_read_interval_s: 0.1
+
+dataset:
+  lerobot:
+    repo_id: "ur5e-turn-on-the-green-switch_spacenavd"
+    root: ".datasets/lerobot/pick_place_one_pen_train_50_v3.0"
+    fps: 15
+    async_recording: true
+    record_queue_size: 64
+
+safety:
+  joint_limits_file: "configs/safety/ur5e_joint_limits.yaml"
+
+vla:
+  server_url: "ws://127.0.0.1:8000"
+  api_key:
+  repo_id: "ur5e-turn-on-the-green-switch_spacenavd"
+  state_key: "observation.state"
+  image_key_map:
+    third_left_top_rgb: "observation.images.third_person"
+    wrist_rgb: "observation.images.wrist"
+  action_space: "abs"
+  execute_horizon: 15
+  request_timeout_s: 5.0
+  # max_joint_delta: 0.1
+  reset_on_start: true
+  threadhold: 0.7 ##0.7for block
+
+
+task:
+  file: "configs/tasks/turn_on_the_green_switch.yaml"
+  episode_count: 50

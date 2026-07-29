@@ -1,0 +1,49 @@
+# keep each top level section alphabetical
+# keep each item within the sections alphabetical
+
+# large files
+.datasets/
+*.bag
+*.h5
+*.mp4
+*.parquet
+*.png
+*.gif
+data/
+results/
+
+# mac
+*.DS_Store
+
+# misc
+*logs*
+*runs*
+*tb_logs*
+*wandb*
+*wandb_logs*
+outputs/*
+
+# python
+.venv/
+*__pycache__
+*.egg-info
+*.hypothesis
+*.ipynb_checkpoints
+*.mypy_cache
+*.pyc
+
+# ide
+*.csproj.user
+*.dtbcache
+*.ide
+*.ide-*
+*.suo
+.vscode/
+.vs/
+
+# vim
+*.swp
+MUJOCO_LOG.TXT
+
+# 3D Model Files
+*.stl

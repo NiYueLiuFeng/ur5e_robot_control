@@ -1,0 +1,15 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[remote "origin"]
+	url = https://github.com/chopintelligence/ur5e_robot_control.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "master"]
+	remote = origin
+	merge = refs/heads/spacenavd_gello_dev
+[branch "spacenavd_gello_dev"]
+	remote = origin
+	merge = refs/heads/spacenavd_gello_dev
+	vscode-merge-base = origin/spacenavd_gello_dev
