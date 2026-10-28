@@ -402,6 +402,29 @@ uv run ws-control \
   --max-steps 20
 ```
 
+If the console script is not on your `PATH`, run the same entry point as a
+module (`uv run` installs the project in editable mode, so `src/` is
+importable):
+
+```bash
+uv run python -m apps.run_ws_control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --server-url ws://<policy-host>:8000 \
+  --max-steps 20
+```
+
+Without `uv`, put `src/` on the path first:
+
+```bash
+PYTHONPATH=src python -m apps.run_ws_control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --server-url ws://<policy-host>:8000 \
+  --max-steps 20
+```
+
+`apps.run_ws_control:main` is the function registered as the `ws-control`
+console script in `pyproject.toml`, so both forms accept the same options.
+
 `vla.execute_horizon` actions are executed per response. The gripper value is
 binarized with `vla.threshold` and sent as 0 or 1000.
 

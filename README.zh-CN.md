@@ -390,6 +390,28 @@ uv run ws-control \
   --max-steps 20
 ```
 
+如果 `ws-control` 控制台脚本不在 `PATH` 中，可以直接以模块方式运行同一个入口
+（`uv run` 会以可编辑模式安装项目，因此 `src/` 可被导入）：
+
+```bash
+uv run python -m apps.run_ws_control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --server-url ws://<policy-host>:8000 \
+  --max-steps 20
+```
+
+不通过 `uv` 运行时，先把 `src/` 加入 `PYTHONPATH`：
+
+```bash
+PYTHONPATH=src python -m apps.run_ws_control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --server-url ws://<policy-host>:8000 \
+  --max-steps 20
+```
+
+`apps.run_ws_control:main` 就是 `pyproject.toml` 中注册为 `ws-control` 控制台脚本的
+同一个函数，两种方式的参数完全一致。
+
 每个响应会执行 `vla.execute_horizon` 条动作。夹爪值使用 `vla.threshold` 二值化后
 以 0 或 1000 下发。
 
