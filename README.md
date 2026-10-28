@@ -3,6 +3,8 @@
 UR5e Robot Control is the edge-runtime repository for Chop Intelligence UR5e
 data collection and VLA-controlled robot execution.
 
+中文说明：[README.zh-CN.md](README.zh-CN.md)
+
 The repository is intentionally scoped to one physical stack:
 
 - Universal Robots UR5e follower arm
