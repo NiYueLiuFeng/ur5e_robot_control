@@ -16,7 +16,7 @@ class dh_modbus_gripper(object):
         for num in range(wLength):
             date = nData[num]
             wCRCWord = (date & 0xFF)^ wCRCWord
-            for bit in range(8) : 
+            for bit in range(8) :
                 if(wCRCWord&0x01)!=0:
                     wCRCWord>>=1
                     wCRCWord^= poly
@@ -50,26 +50,10 @@ class dh_modbus_gripper(object):
         send_buf[6] = crc & 0xFF
         send_buf[7] = (crc >> 8) & 0xFF
 
-        send_temp = send_buf
-        ret = False
-        retrycount = 3
-
-        while ( ret == False ):
-            ret = False
-
-            if(retrycount < 0) :
-                break
-            retrycount = retrycount - 1
-
-            wdlen = m_device.device_wrire(send_temp)
-            if(len(send_temp) != wdlen) :
-                print('write error ! write : ', send_temp)
-                continue
-
-            rev_buf = m_device.device_read(8)
-            if(len(rev_buf) == wdlen) :
-                ret = True
-        return ret
+        request = bytes(send_buf)
+        # Function 0x06 must echo the complete request, including its CRC.
+        self._exchange(request, 8, lambda response: response == request)
+        return True
 
     def ReadRegisterFunc(self,index) :
         send_buf = [0,0,0,0,0,0,0,0]
@@ -84,37 +68,43 @@ class dh_modbus_gripper(object):
         send_buf[6] = crc & 0xFF
         send_buf[7] = (crc >> 8) & 0xFF
 
-        send_temp = send_buf
-        ret = False
-        retrycount = 3
+        def valid_response(response):
+            return (
+                len(response) == 7
+                and response[:3] == bytes((self.gripper_ID, 0x03, 0x02))
+                and self.CRC16(response, 5)
+                == int.from_bytes(response[-2:], "little")
+            )
 
-        while ( ret == False ):
-            ret = False
+        response = self._exchange(bytes(send_buf), 7, valid_response)
+        return int.from_bytes(response[3:5], "big")
 
-            if(retrycount < 0) :
-                break
-            retrycount = retrycount - 1
-
-            wdlen = m_device.device_wrire(send_temp)
-            if(len(send_temp) != wdlen) :
-                print('write error ! write : ', send_temp)
+    def _exchange(self, request, response_length, valid_response):
+        last_response = b""
+        for _ in range(4):
+            # Discard stale/partial replies before retrying a transaction.
+            m_device.reset_input_buffer()
+            if m_device.device_wrire(request) != len(request):
                 continue
+            last_response = bytes(m_device.device_read(response_length))
+            if valid_response(last_response):
+                return last_response
 
-            rev_buf = m_device.device_read(7)
-            if(len(rev_buf) == 7) :
-                value = ((rev_buf[4]&0xFF)|(rev_buf[3] << 8))
-                ret = True
-        return value
+        register = int.from_bytes(request[2:4], "big")
+        raise RuntimeError(
+            f"Modbus transaction failed for register 0x{register:04x}; "
+            f"last response: {last_response.hex(' ') or '<empty>'}"
+        )
 
     def Initialization(self) :
         self.WriteRegisterFunc(0x0100,0xA5)
-        
+
     def SetTargetPosition(self,refpos) :
         self.WriteRegisterFunc(0x0103,refpos);
 
     def SetTargetForce(self,force) :
         self.WriteRegisterFunc(0x0101,force);
-        
+
     def SetTargetSpeed(self,speed) :
         self.WriteRegisterFunc(0x0104,speed);
 

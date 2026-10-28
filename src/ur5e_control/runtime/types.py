@@ -25,6 +25,7 @@ class RobotAction:
 class RobotObservation:
     """Observation payload passed to policies and VLA servers."""
     tcp_force: Tuple[float, ...]
+    tcp_pose: Tuple[float, ...]
     joint_positions: Tuple[float, ...]
     gripper_position: Tuple[float, ...] = ()
     images: Dict[str, Any] = field(default_factory=dict)
@@ -43,6 +44,11 @@ class RobotObservation:
         )
         object.__setattr__(
             self,
+            "tcp_pose",
+            tuple(float(value) for value in self.tcp_pose),
+        )
+        object.__setattr__(
+            self,
             "gripper_position",
             tuple(float(value) for value in self.gripper_position),
         )
@@ -56,6 +62,8 @@ class RobotObservation:
         return {
             "joint_positions": list(self.joint_positions),
             "gripper_position": list(self.gripper_position),
+            "tcp_force": list(self.tcp_force),
+            "tcp_pose": list(self.tcp_pose),
             "images": {
                 name: _to_jsonable_image(image) for name, image in self.images.items()
             },

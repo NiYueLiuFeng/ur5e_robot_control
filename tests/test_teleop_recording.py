@@ -10,7 +10,9 @@ class TeleopRecordingTest(unittest.TestCase):
         env_obs = {
             "joint_positions": [0, 1, 2, 3, 4, 5, 6],
             "wrist_rgb": FakeImage(shape=(480, 640, 3)),
-            "third_front_rgb": FakeImage(shape=(480, 640, 3)),
+            "third_left_top_rgb": FakeImage(shape=(480, 640, 3)),
+            "wrist_depth": FakeImage(shape=(480, 640)),
+            "third_left_top_depth": FakeImage(shape=(480, 640, 1)),
         }
 
         self.assertEqual(
@@ -18,6 +20,8 @@ class TeleopRecordingTest(unittest.TestCase):
             {
                 "wrist": (480, 640, 3),
                 "third_person": (480, 640, 3),
+                "wrist_depth": (480, 640, 1),
+                "third_person_depth": (480, 640, 1),
             },
         )
 
@@ -33,6 +37,8 @@ class TeleopRecordingTest(unittest.TestCase):
         env_obs = {
             "joint_positions": [0, 1, 2, 3, 4, 5, 6],
             "gripper_position": [6],
+            "tcp_force": [0] * 6,
+            "tcp_pose": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
             "wrist_rgb": "wrist-frame",
         }
 
@@ -46,6 +52,10 @@ class TeleopRecordingTest(unittest.TestCase):
         )
 
         self.assertEqual(recorder.calls[0][0].joint_positions, (0, 1, 2, 3, 4, 5, 6))
+        self.assertEqual(
+            recorder.calls[0][0].tcp_pose,
+            (0.1, 0.2, 0.3, 0.4, 0.5, 0.6),
+        )
         self.assertEqual(recorder.calls[0][0].images, {"wrist": "wrist-frame"})
         self.assertEqual(recorder.calls[0][1].values, (10, 11, 12, 13, 14, 15, 16))
         self.assertEqual(recorder.calls[0][2], "place the pen into the pen holder")

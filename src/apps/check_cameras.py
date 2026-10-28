@@ -62,6 +62,7 @@ def main(argv=None) -> None:
         realsense_ids=config.camera.realsense_ids,
         fps=fps,
         enable_depth=config.camera.enable_depth,
+        depth_options=config.camera.depth_options,
     )
     try:
         outputs = record_camera_check(

@@ -1,0 +1,7 @@
+task: "Pick up the pens and the blocks from the table and place them into the pen holder and the box, respectively."
+type: "long_horizon_task"
+sub_tasks:
+  - "Pick up the pen from the table "
+  - "place the pen in the pen holder"
+  - "Pick up the block from the table "
+  - "place the block in the box"

@@ -10,6 +10,7 @@ from ur5e_control.hardware.cameras.base import CameraDriver
 
 DEFAULT_CAMERA_PORT = 5000
 DEFAULT_ZMQ_TIMEOUT_MS = 600000
+DEFAULT_FIRST_FRAME_TIMEOUT_S = 15.0
 
 
 class LatestFrameCache:
@@ -82,10 +83,16 @@ class LatestFrameCache:
 class ZMQClientCamera(CameraDriver):
     """A class representing a ZMQ client for a leader robot."""
 
-    def __init__(self, port: int = DEFAULT_CAMERA_PORT, host: str = "127.0.0.1"):
+    def __init__(
+        self,
+        port: int = DEFAULT_CAMERA_PORT,
+        host: str = "127.0.0.1",
+        camera_name: str | None = None,
+    ):
         self._context = zmq.Context()  # type: ignore
         self._port = port
         self._host = host
+        self._camera_name = camera_name
         self._socket = None
         self._reset_socket()
 
@@ -107,13 +114,22 @@ class ZMQClientCamera(CameraDriver):
         Returns:
             T: The current state of the leader robot.
         """
-        # pack the image_size and send it to the server
-        send_message = pickle.dumps(img_size)
+        return self._request({"method": "read", "img_size": img_size})
+
+    def get_calibration(self):
+        """Return calibration for the active streams on the camera server."""
+
+        return self._request({"method": "get_calibration"})
+
+    def _request(self, request):
+        send_message = pickle.dumps(request)
         try:
             self._socket.send(send_message)
             state_dict = pickle.loads(self._socket.recv())
             if isinstance(state_dict, dict) and "error" in state_dict:
-                raise RuntimeError(state_dict["error"])
+                label = getattr(self, "_camera_name", None)
+                prefix = f"Camera {label}: " if label else "Camera: "
+                raise RuntimeError(prefix + str(state_dict["error"]))
             return state_dict
         except zmq.Again as exc:  # type: ignore
             self._reset_socket()
@@ -150,9 +166,18 @@ class ZMQServerCamera:
             while not self._stop_event.is_set():
                 try:
                     message = self._socket.recv()
-                    img_size = pickle.loads(message)
-                    camera_read = self._frame_cache.read_latest(img_size)
-                    self._socket.send(pickle.dumps(camera_read))
+                    request = pickle.loads(message)
+                    method = request.get("method")
+                    if method == "read":
+                        result = self._frame_cache.read_latest(
+                            request.get("img_size"),
+                            timeout_s=DEFAULT_FIRST_FRAME_TIMEOUT_S,
+                        )
+                    elif method == "get_calibration":
+                        result = self._camera.get_calibration()
+                    else:
+                        raise ValueError(f"Unknown camera method: {method!r}")
+                    self._socket.send(pickle.dumps(result))
                 except zmq.Again:  # type: ignore
                     pass
                 except Exception as exc:  # noqa: BLE001

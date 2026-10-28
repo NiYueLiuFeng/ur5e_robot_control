@@ -45,6 +45,50 @@ configs/hardware/ur5e_d455.yaml
 目前图像数据仍通过 pickle-over-ZMQ 返回，已经降低了取帧阻塞，但还没有
 切换到 shared memory ring buffer。
 
+## 深度视频时间戳修复与质量门禁
+
+对已有 LeRobot v3 数据先执行只读审计：
+
+```bash
+uv run repair-video-timestamps \
+  --root .datasets/lerobot/pick_place_block_150_train_v3.0
+```
+
+审计确认只有 episode 边界偏移、episode 内部仍为固定 FPS 后，再应用修复：
+
+```bash
+uv run repair-video-timestamps \
+  --root .datasets/lerobot/pick_place_block_150_train_v3.0 \
+  --apply
+```
+
+写入前会生成 `*.parquet.pre-timestamp-repair.bak` 备份。不要通过增大
+LeRobot 的 timestamp tolerance 绕过错误；如果工具报告 episode 内部不是固定
+FPS，应重新编码对应视频文件。
+
+新数据在 `dataset.lerobot.repair_video_timestamps: true` 时会在 finalize 后自动
+按真实 PTS 校正深度视频 metadata。`dataset.lerobot.depth_min_m: 0.0` 用于让
+RealSense 的无效值 0 mm 在视频解码后仍保持为 0。
+
+启用 `camera.depth_quality` 后，每个 episode 开始前会检查多帧原始 Z16：
+
+```yaml
+camera:
+  enable_depth: true
+  depth_quality:
+    sample_count: 15
+    max_invalid_ratio:
+      wrist: 0.50
+      third_left_top: 0.35
+  depth_options:
+    wrist:
+      visual_preset: high_density
+```
+
+无效像素中位数超过阈值时录制会被阻止。诊断双 D455 红外干扰时，可临时对
+其中一路设置 `emitter_enabled: false` 做对照；不要用 hole filling 掩盖大面积
+无效深度。
+
 ## 安装和硬件配置
 
 安装基础依赖：
@@ -428,6 +472,14 @@ UR5E_AGENT_NAME=spacemouse uv run record-teleop --config configs/hardware/ur5e_d
 6. 对齐 leader/follower 初始位置。
 7. 按 episode 保存 LeRobot v3 数据。
 
+创建相机流时会直接通过 RealSense SDK 读取当前 color/depth stream 的内参及
+stream 间外参，不依赖 `configs/cameras/*.yaml`。这些参数会注册为 LeRobot
+feature，并随每一帧写入 parquet。字段名分别使用
+`observation.camera_intrinsics.<camera>.*` 和
+`observation.camera_extrinsics.<transform>.matrix`；其中图像宽高存放在
+`observation.camera_intrinsics.<camera>.resolution`，避免被 LeRobot 的统计
+模块误判成图像张量。
+
 每个 D455 camera server 会持续读取最新 RGB 帧；采集循环请求的是缓存中的
 latest frame，而不是在控制路径上等待相机现场采一帧。相机和机器人 ZMQ
 client 都设置了有界超时，并会在 timeout/socket error 后重建 REQ socket，
@@ -440,6 +492,8 @@ client 都设置了有界超时，并会在 timeout/socket error 后重建 REQ s
 - live env observation 中的 `wrist_rgb` / `third_front_rgb`: 从 RealSense
   camera server 读取的 RGB 图像；默认没有 `*_depth` key。
 - LeRobot `observation.state`: 由 live `joint_positions` 写入。
+- LeRobot `observation.tcp_pose`: 由 UR RTDE `getActualTCPPose()` 写入，格式为
+  `[x, y, z, rx, ry, rz]`；平移单位为米，姿态为旋转向量（弧度）。
 - LeRobot `observation.images.wrist`: 由 live `wrist_rgb` 写入。
 - LeRobot `observation.images.third_person`: 由 live `third_front_rgb` 写入。
 - LeRobot `action`: 从当前 teleop agent 输出，经安全区 clamp 后写入数据集。

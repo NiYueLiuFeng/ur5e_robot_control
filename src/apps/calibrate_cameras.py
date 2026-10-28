@@ -267,6 +267,7 @@ def _start_camera_server(config):
         realsense_ids=config.camera.realsense_ids,
         fps=config.camera.fps,
         enable_depth=config.camera.enable_depth,
+        depth_options=config.camera.depth_options,
     )
 
 

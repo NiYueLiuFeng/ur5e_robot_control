@@ -1,5 +1,0 @@
-task: "pick up the white pen from the desk and place it into the pen holder"
-type: "long_horizon_task"
-sub_tasks:
-  - "pick up the white pen from the desk"
-  - "place the white pen into the pen holder"

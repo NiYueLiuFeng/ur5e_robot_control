@@ -22,12 +22,21 @@ class RuntimeConfigTest(unittest.TestCase):
             "wrist",
         )
         self.assertEqual(config.camera.fps, 30)
-        self.assertFalse(config.camera.enable_depth)
+        self.assertTrue(config.camera.enable_depth)
+        self.assertEqual(config.camera.depth_quality_sample_count, 15)
+        self.assertEqual(config.camera.depth_max_invalid_ratio, {})
+        self.assertEqual(
+            config.camera.depth_options,
+            {
+                "wrist": {"visual_preset": "high_density"},
+                "third_left_top": {"visual_preset": "high_density"},
+            },
+        )
         self.assertEqual(config.camera.calibration_dir, "configs/cameras")
         self.assertEqual(
             config.camera.intrinsics_files,
             {
-                "third_front": "configs/cameras/intrinsics_third_front.yaml",
+                "third_left_top": "configs/cameras/intrinsics_third_left_top.yaml",
                 "wrist": "configs/cameras/intrinsics_wrist.yaml",
             },
         )
@@ -37,23 +46,28 @@ class RuntimeConfigTest(unittest.TestCase):
         )
         self.assertEqual(
             config.dataset.lerobot_root,
-            ".datasets/lerobot/ur5e-pen-pick-place",
+            ".datasets/lerobot/pick_place_block_150_train1_v3.0",
         )
-        self.assertEqual(config.dataset.lerobot_fps, 30)
+        self.assertEqual(config.dataset.lerobot_fps, 15)
         self.assertTrue(config.dataset.lerobot_async_recording)
         self.assertEqual(config.dataset.lerobot_record_queue_size, 64)
+        self.assertTrue(config.dataset.lerobot_repair_video_timestamps)
+        self.assertEqual(config.dataset.lerobot_depth_min_m, 0.0)
         self.assertEqual(
             config.safety.joint_limits_file,
             "configs/safety/ur5e_joint_limits.yaml",
         )
-        self.assertEqual(config.task.file, "configs/tasks/pen_pick_place.yaml")
+        self.assertEqual(
+            config.task.file,
+            "configs/tasks/pick_place_purple_block.yaml",
+        )
         self.assertEqual(config.vla.server_url, "ws://127.0.0.1:8000")
         self.assertEqual(config.vla.state_key, "observation.state")
         self.assertEqual(
             config.vla.image_key_map,
             {
-                "third_front_rgb": "observation.images.third_front_image",
-                "wrist_rgb": "observation.images.wrist_image",
+                "third_left_top_rgb": "observation.images.third_person",
+                "wrist_rgb": "observation.images.wrist",
             },
         )
         self.assertEqual(config.vla.request_timeout_s, 5.0)
@@ -89,6 +103,7 @@ class RuntimeConfigTest(unittest.TestCase):
                 "UR5E_LEROBOT_FPS": "15",
                 "UR5E_LEROBOT_ASYNC_RECORDING": "false",
                 "UR5E_LEROBOT_RECORD_QUEUE_SIZE": "8",
+                "UR5E_LEROBOT_REPAIR_VIDEO_TIMESTAMPS": "true",
                 "UR5E_JOINT_LIMITS_FILE": "/data/limits/ur5e_joint_limits.yaml",
                 "UR5E_EPISODE_COUNT": "7",
                 "UR5E_VLA_SERVER_URL": "ws://vla.example:9000",
@@ -132,6 +147,7 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(config.dataset.lerobot_fps, 15)
         self.assertFalse(config.dataset.lerobot_async_recording)
         self.assertEqual(config.dataset.lerobot_record_queue_size, 8)
+        self.assertTrue(config.dataset.lerobot_repair_video_timestamps)
         self.assertEqual(
             config.safety.joint_limits_file,
             "/data/limits/ur5e_joint_limits.yaml",
@@ -215,11 +231,15 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(config.spacemouse.gripper_open, 1000)
         self.assertEqual(config.spacemouse.gripper_closed, 0)
 
-    def test_required_camera_names_are_rejected_when_missing(self):
+    def test_single_configured_camera_gets_default_intrinsics_path(self):
         from ur5e_control.runtime.config import CameraRuntimeConfig
 
-        with self.assertRaisesRegex(ValueError, "third_front"):
-            CameraRuntimeConfig(realsense_ids={"333422304095": "wrist"})
+        config = CameraRuntimeConfig(realsense_ids={"333422304095": "wrist"})
+
+        self.assertEqual(
+            config.intrinsics_files,
+            {"wrist": "configs/cameras/intrinsics_wrist.yaml"},
+        )
 
     def test_invalid_camera_fps_is_rejected(self):
         from dataclasses import replace
@@ -234,6 +254,35 @@ class RuntimeConfigTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "camera.fps"):
             replace(config, fps=0)
+
+    def test_invalid_depth_quality_limit_is_rejected(self):
+        from ur5e_control.runtime.config import CameraRuntimeConfig
+
+        with self.assertRaisesRegex(ValueError, "must be in"):
+            CameraRuntimeConfig(
+                enable_depth=True,
+                realsense_ids={"333422304095": "wrist"},
+                depth_max_invalid_ratio={"wrist": 1.1},
+            )
+
+    def test_disabling_depth_by_environment_also_disables_quality_gate(self):
+        from ur5e_control.runtime.config import load_runtime_config
+
+        config = load_runtime_config(environ={"UR5E_CAMERA_ENABLE_DEPTH": "false"})
+
+        self.assertFalse(config.camera.enable_depth)
+        self.assertEqual(config.camera.depth_max_invalid_ratio, {})
+        self.assertEqual(config.camera.depth_options, {})
+
+    def test_unknown_depth_option_is_rejected(self):
+        from ur5e_control.runtime.config import CameraRuntimeConfig
+
+        with self.assertRaisesRegex(ValueError, "unknown options"):
+            CameraRuntimeConfig(
+                enable_depth=True,
+                realsense_ids={"333422304095": "wrist"},
+                depth_options={"wrist": {"magic_filter": True}},
+            )
 
     def test_config_without_realsense_ids_is_rejected(self):
         from ur5e_control.runtime.config import load_runtime_config

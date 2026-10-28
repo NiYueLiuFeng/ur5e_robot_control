@@ -1,5 +1,0 @@
-task: "Pick up the pink block and place it on top of the red block"
-type: "long_horizon_task"
-sub_tasks:
-  - "pick up the pink block"
-  - "place the pink block on top of the red block"

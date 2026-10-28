@@ -40,7 +40,14 @@ agent:
 camera:
   hostname: "127.0.0.1"
   fps: 30
-  enable_depth: false
+  enable_depth: true
+  # High Density reduces holes. To diagnose two-camera IR interference, test
+  # emitter_enabled: false on one camera at a time instead of enabling both here.
+  depth_options:
+    wrist:
+      visual_preset: high_density
+    third_left_top:
+      visual_preset: high_density
   calibration_dir: "configs/cameras"
   realsense_ids:
     "353522301461": third_left_top
@@ -59,11 +66,17 @@ gripper:
 
 dataset:
   lerobot:
-    repo_id: "pick_place_pink_block_red_block_01_125_train_v3.0"
-    root: ".datasets/lerobot/test_joint"
+    repo_id: "pick_place_pens_blocks_200_train_v3.0"
+    root: ".datasets/lerobot/pick_place_pens_blocks_200_train_v3.0"
     fps: 15
     async_recording: true
     record_queue_size: 64
+    # HEVC episode concatenation can shift PTS by a few time-base ticks.
+    # Rebuild the depth-video episode boundaries from actual frame PTS at finalize.
+    repair_video_timestamps: true
+    # Preserve the RealSense invalid-depth sentinel: raw 0 mm decodes back to 0,
+    # rather than being clipped to the old 10 mm default.
+    depth_min_m: 0.0
 
 safety:
   joint_limits_file: "configs/safety/ur5e_joint_limits.yaml"
@@ -71,14 +84,14 @@ safety:
 vla:
   server_url: "ws://127.0.0.1:8000"
   api_key:
-  repo_id: "pick_place_pink_block_red_block_01_125_train_v3.0"
+  repo_id: "pick_place_block_150_train_v3.0"
   state_key: "observation.state"
   image_key_map:
     third_left_top_rgb: "observation.images.third_person"
     wrist_rgb: "observation.images.wrist"
   action_space: "abs"
   execute_horizon: 15
-  request_timeout_s: 5.0
+  request_timeout_s: 600.0
   # max_joint_delta: 0.1
   reset_on_start: true
   threadhold: 0.7 ##0.7for block
@@ -93,5 +106,5 @@ rtc:
 
 
 task:
-  file: "configs/tasks/pick_place_pink_block.yaml"
-  episode_count: 1
+  file: "configs/tasks/pick_place_pen_block.yaml"
+  episode_count: 20

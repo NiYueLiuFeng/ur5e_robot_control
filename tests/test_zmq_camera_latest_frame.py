@@ -1,3 +1,4 @@
+import pickle
 import unittest
 
 
@@ -39,6 +40,22 @@ class LatestFrameCacheTest(unittest.TestCase):
 
 
 class ZMQClientCameraTest(unittest.TestCase):
+    def test_get_calibration_requests_camera_server_calibration(self):
+        from ur5e_control.hardware.cameras.zmq import ZMQClientCamera
+
+        client = ZMQClientCamera.__new__(ZMQClientCamera)
+        client._socket = ResponseSocket(
+            {"color_intrinsics": {"image_size": [640, 480]}}
+        )
+
+        calibration = client.get_calibration()
+
+        self.assertEqual(calibration["color_intrinsics"]["image_size"], [640, 480])
+        self.assertEqual(
+            pickle.loads(client._socket.sent_message),
+            {"method": "get_calibration"},
+        )
+
     def test_read_resets_socket_after_timeout(self):
         import zmq
 
@@ -57,6 +74,21 @@ class ZMQClientCameraTest(unittest.TestCase):
             client.read()
 
         self.assertEqual(client.reset_count, 1)
+
+    def test_server_error_includes_camera_name(self):
+        from ur5e_control.hardware.cameras.zmq import ZMQClientCamera
+
+        client = ZMQClientCamera.__new__(ZMQClientCamera)
+        client._camera_name = "wrist"
+        client._socket = ResponseSocket(
+            {"error": "Frame didn't arrive within 5000"}
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Camera wrist: Frame didn't arrive",
+        ):
+            client.read()
 
 
 class FakeCamera:
@@ -83,6 +115,18 @@ class TimeoutSocket:
 
     def recv(self):
         raise self.exc
+
+
+class ResponseSocket:
+    def __init__(self, response):
+        self.response = response
+        self.sent_message = None
+
+    def send(self, message):
+        self.sent_message = message
+
+    def recv(self):
+        return pickle.dumps(self.response)
 
 
 if __name__ == "__main__":

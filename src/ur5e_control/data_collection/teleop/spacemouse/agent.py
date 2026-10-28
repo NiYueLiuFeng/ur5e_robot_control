@@ -65,13 +65,19 @@ class SpaceMouseAgent(Agent):
     def _open_spacemouse(self, device_path: Optional[str]):
         import pyspacemouse
 
-        mouse = (
-            pyspacemouse.open()
-            if device_path is None
-            else pyspacemouse.open(path=device_path)
-        )
+        target = "auto-detected device" if device_path is None else device_path
+        try:
+            mouse = (
+                pyspacemouse.open()
+                if device_path is None
+                else pyspacemouse.open_by_path(device_path)
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"Failed to open SpaceMouse ({target}): {exc}. "
+                "Check that its /dev/hidraw* node is accessible to this user."
+            ) from exc
         if not mouse:
-            target = "auto-detected device" if device_path is None else device_path
             raise RuntimeError(f"Failed to open SpaceMouse device: {target}")
         return mouse
 
@@ -91,7 +97,8 @@ class SpaceMouseAgent(Agent):
             _init_transforms()
 
         current_qpos = np.asarray(obs["joint_positions"][:6])
-        current_gripper_position = float(obs["joint_positions"][-1])
+        # Binary observations use 0/1; robot commands require PGC 0/1000.
+        current_gripper_position = float(obs["joint_positions"][-1]) * 1000.0
         self.physics.data.qpos[:6] = current_qpos
         self.physics.step()
 

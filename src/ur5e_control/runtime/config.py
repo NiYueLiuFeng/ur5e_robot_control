@@ -112,6 +112,9 @@ class CameraRuntimeConfig:
     hostname: str = "127.0.0.1"
     fps: int = 30
     enable_depth: bool = False
+    depth_quality_sample_count: int = 15
+    depth_max_invalid_ratio: Mapping[str, float] = field(default_factory=dict)
+    depth_options: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     realsense_ids: Mapping[str, str] = field(default_factory=dict)
     calibration_dir: str = "configs/cameras"
     intrinsics_files: Mapping[str, str] = field(default_factory=dict)
@@ -120,6 +123,8 @@ class CameraRuntimeConfig:
     def __post_init__(self) -> None:
         if self.fps <= 0:
             raise ValueError("camera.fps must be positive")
+        if self.depth_quality_sample_count <= 0:
+            raise ValueError("camera.depth_quality.sample_count must be positive")
         ids = {str(serial): str(name) for serial, name in self.realsense_ids.items()}
         if not ids:
             raise ValueError("camera.realsense_ids must define at least one camera")
@@ -135,6 +140,67 @@ class CameraRuntimeConfig:
         if not self.extrinsics_file:
             raise ValueError("camera.extrinsics_file must be set")
         logical_names = set(ids.values())
+        depth_options = {
+            str(name): dict(_mapping(options))
+            for name, options in self.depth_options.items()
+        }
+        unknown_option_names = set(depth_options).difference(logical_names)
+        if unknown_option_names:
+            unknown = ", ".join(sorted(unknown_option_names))
+            raise ValueError(
+                "camera.depth_options contains unknown logical cameras: "
+                f"{unknown}"
+            )
+        allowed_depth_options = {
+            "visual_preset",
+            "emitter_enabled",
+            "laser_power",
+        }
+        for name, options in depth_options.items():
+            unknown_options = set(options).difference(allowed_depth_options)
+            if unknown_options:
+                unknown = ", ".join(sorted(unknown_options))
+                raise ValueError(
+                    f"camera.depth_options.{name} contains unknown options: {unknown}"
+                )
+            if "emitter_enabled" in options and not isinstance(
+                options["emitter_enabled"], bool
+            ):
+                raise ValueError(
+                    f"camera.depth_options.{name}.emitter_enabled must be boolean"
+                )
+            if "laser_power" in options:
+                try:
+                    options["laser_power"] = float(options["laser_power"])
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"camera.depth_options.{name}.laser_power must be numeric"
+                    ) from exc
+        if depth_options and not self.enable_depth:
+            raise ValueError("camera.depth_options requires camera.enable_depth")
+        object.__setattr__(self, "depth_options", depth_options)
+        depth_limits = {
+            str(name): float(value)
+            for name, value in self.depth_max_invalid_ratio.items()
+        }
+        unknown_depth_names = set(depth_limits).difference(logical_names)
+        if unknown_depth_names:
+            unknown = ", ".join(sorted(unknown_depth_names))
+            raise ValueError(
+                "camera.depth_quality.max_invalid_ratio contains unknown logical "
+                f"cameras: {unknown}"
+            )
+        for name, limit in depth_limits.items():
+            if not 0.0 <= limit <= 1.0:
+                raise ValueError(
+                    "camera.depth_quality.max_invalid_ratio."
+                    f"{name} must be in [0, 1]"
+                )
+        if depth_limits and not self.enable_depth:
+            raise ValueError(
+                "camera.depth_quality.max_invalid_ratio requires camera.enable_depth"
+            )
+        object.__setattr__(self, "depth_max_invalid_ratio", depth_limits)
         intrinsics_files = {
             str(name): str(path) for name, path in self.intrinsics_files.items()
         }
@@ -182,12 +248,16 @@ class DatasetRuntimeConfig:
     lerobot_fps: int = 30
     lerobot_async_recording: bool = True
     lerobot_record_queue_size: int = 64
+    lerobot_repair_video_timestamps: bool = False
+    lerobot_depth_min_m: float | None = None
 
     def __post_init__(self) -> None:
         if self.lerobot_fps <= 0:
             raise ValueError("dataset.lerobot.fps must be positive")
         if self.lerobot_record_queue_size <= 0:
             raise ValueError("dataset.lerobot.record_queue_size must be positive")
+        if self.lerobot_depth_min_m is not None and self.lerobot_depth_min_m < 0:
+            raise ValueError("dataset.lerobot.depth_min_m must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -422,11 +492,24 @@ def _load_spacemouse_config(data: Mapping[str, Any]) -> SpaceMouseRuntimeConfig:
 def _load_camera_config(data: Mapping[str, Any]) -> CameraRuntimeConfig:
     if "realsense_ids" not in data:
         raise ValueError("camera.realsense_ids must be defined in the config file")
+    depth_quality = _mapping(data.get("depth_quality"))
     return CameraRuntimeConfig(
         hostname=str(data.get("hostname", "127.0.0.1")),
         fps=_int_value(data.get("fps", 30), "camera.fps"),
         enable_depth=_bool_value(
             data.get("enable_depth", False), "camera.enable_depth"
+        ),
+        depth_quality_sample_count=_int_value(
+            depth_quality.get("sample_count", 15),
+            "camera.depth_quality.sample_count",
+        ),
+        depth_max_invalid_ratio=_float_mapping(
+            depth_quality.get("max_invalid_ratio", {}),
+            "camera.depth_quality.max_invalid_ratio",
+        ),
+        depth_options=_nested_mapping(
+            data.get("depth_options", {}),
+            "camera.depth_options",
         ),
         realsense_ids=_string_mapping(
             data.get("realsense_ids"),
@@ -464,6 +547,7 @@ def _load_gripper_config(data: Mapping[str, Any]) -> GripperRuntimeConfig:
 
 def _load_dataset_config(data: Mapping[str, Any]) -> DatasetRuntimeConfig:
     lerobot = _mapping(data.get("lerobot"))
+    depth_min_m = lerobot.get("depth_min_m")
     return DatasetRuntimeConfig(
         lerobot_repo_id=str(
             lerobot.get("repo_id", "chopintelligence/ur5e-pen-pick-place")
@@ -477,6 +561,15 @@ def _load_dataset_config(data: Mapping[str, Any]) -> DatasetRuntimeConfig:
         lerobot_record_queue_size=_int_value(
             lerobot.get("record_queue_size", 64),
             "dataset.lerobot.record_queue_size",
+        ),
+        lerobot_repair_video_timestamps=_bool_value(
+            lerobot.get("repair_video_timestamps", False),
+            "dataset.lerobot.repair_video_timestamps",
+        ),
+        lerobot_depth_min_m=(
+            None
+            if depth_min_m is None
+            else _float_value(depth_min_m, "dataset.lerobot.depth_min_m")
         ),
     )
 
@@ -629,12 +722,17 @@ def _apply_env_overrides(
             fps=_int_value(environ["UR5E_CAMERA_FPS"], "UR5E_CAMERA_FPS"),
         )
     if "UR5E_CAMERA_ENABLE_DEPTH" in environ:
+        enable_depth = _bool_value(
+            environ["UR5E_CAMERA_ENABLE_DEPTH"],
+            "UR5E_CAMERA_ENABLE_DEPTH",
+        )
         camera = replace(
             camera,
-            enable_depth=_bool_value(
-                environ["UR5E_CAMERA_ENABLE_DEPTH"],
-                "UR5E_CAMERA_ENABLE_DEPTH",
+            enable_depth=enable_depth,
+            depth_max_invalid_ratio=(
+                camera.depth_max_invalid_ratio if enable_depth else {}
             ),
+            depth_options=(camera.depth_options if enable_depth else {}),
         )
     if "UR5E_CAMERA_CALIBRATION_DIR" in environ:
         camera = replace(
@@ -699,6 +797,14 @@ def _apply_env_overrides(
             lerobot_record_queue_size=_int_value(
                 environ["UR5E_LEROBOT_RECORD_QUEUE_SIZE"],
                 "UR5E_LEROBOT_RECORD_QUEUE_SIZE",
+            ),
+        )
+    if "UR5E_LEROBOT_REPAIR_VIDEO_TIMESTAMPS" in environ:
+        dataset = replace(
+            dataset,
+            lerobot_repair_video_timestamps=_bool_value(
+                environ["UR5E_LEROBOT_REPAIR_VIDEO_TIMESTAMPS"],
+                "UR5E_LEROBOT_REPAIR_VIDEO_TIMESTAMPS",
             ),
         )
 
@@ -790,6 +896,22 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 def _string_mapping(value: Any, label: str) -> Mapping[str, str]:
     data = _mapping(value)
     return {str(key): str(item) for key, item in data.items()}
+
+
+def _float_mapping(value: Any, label: str) -> Mapping[str, float]:
+    data = _mapping(value)
+    try:
+        return {str(key): float(item) for key, item in data.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must map names to numbers") from exc
+
+
+def _nested_mapping(value: Any, label: str) -> Mapping[str, Mapping[str, Any]]:
+    data = _mapping(value)
+    try:
+        return {str(key): dict(_mapping(item)) for key, item in data.items()}
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must map names to mappings") from exc
 
 
 def _float_tuple(value: Any, label: str) -> tuple[float, ...]:

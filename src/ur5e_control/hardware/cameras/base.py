@@ -1,4 +1,4 @@
-from typing import Optional, Protocol, Tuple
+from typing import Any, Mapping, Optional, Protocol, Tuple
 
 import numpy as np
 
@@ -22,3 +22,6 @@ class CameraDriver(Protocol):
             np.ndarray: The color image.
             Optional[np.ndarray]: The depth image when enabled.
         """
+
+    def get_calibration(self) -> Mapping[str, Any]:
+        """Return the active camera stream calibration."""

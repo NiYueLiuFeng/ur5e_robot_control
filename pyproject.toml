@@ -40,6 +40,7 @@ calibrate-cameras = "apps.calibrate_cameras:main"
 calibrate-safety-zone = "apps.calibrate_safety_zone:main"
 check-cameras = "apps.check_cameras:main"
 check-recording-ready = "apps.check_recording_ready:main"
+repair-video-timestamps = "apps.repair_video_timestamps:main"
 record-teleop = "apps.record_teleop:main"
 run-vla-inference = "apps.run_vla_inference:main"
 

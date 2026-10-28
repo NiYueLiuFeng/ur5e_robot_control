@@ -194,6 +194,7 @@ def build_vla_inference_controller(
             realsense_ids=dict(config.camera.realsense_ids),
             fps=config.camera.fps,
             enable_depth=config.camera.enable_depth,
+            depth_options=config.camera.depth_options,
         )
         atexit.register(camera_server.stop)
 

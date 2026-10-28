@@ -10,8 +10,11 @@ class dh_device(object) :
         serialPort.bytesize = 8
         serialPort.parity = 'N'
         serialPort.stopbits = 1
-        serialPort.set_output_flow_control = 'N'
-        serialPort.set_input_flow_control = 'N'
+        serialPort.xonxoff = False
+        serialPort.rtscts = False
+        serialPort.dsrdtr = False
+        serialPort.timeout = 0.5
+        serialPort.write_timeout = 0.5
 
         serialPort.open()
         if(serialPort.isOpen()) :
@@ -41,13 +44,16 @@ class dh_device(object) :
             return -1
 
     def device_read(self, wlen) :
-        responseData = [0,0,0,0,0,0,0,0]
         if(serialPort.isOpen()) :
-            responseData = serialPort.readline(wlen)
-            return responseData
+            # Modbus RTU is binary: 0x0a is data, not a line terminator.
+            return serialPort.read(wlen)
         else :
-            return -1
-        
+            return b""
+
+    def reset_input_buffer(self):
+        if serialPort.isOpen():
+            serialPort.reset_input_buffer()
+
     """description of class"""
 
 

@@ -1,5 +1,0 @@
-task: "pick up the cable and put it into the white box"
-type: "long_horizon_task"
-sub_tasks:
-  - "pick up the cable from the desk"
-  - "place the cable into the white box"

@@ -1,4 +1,0 @@
-task: "turn off the green switch"
-type: "long_horizon_task"
-sub_tasks:
-  - "turn off the green switch"

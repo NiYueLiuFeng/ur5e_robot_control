@@ -1,0 +1,5 @@
+task: "Pick up the blocks from the table and place them in the box."
+type: "long_horizon_task"
+sub_tasks:
+  - "Pick up the block from the table "
+  - "place the block in the box"

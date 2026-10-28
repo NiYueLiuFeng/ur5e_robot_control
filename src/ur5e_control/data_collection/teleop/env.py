@@ -81,10 +81,6 @@ class RobotEnv:
         return np.asarray(values, dtype=float)
     
 
-    def binarize_gripper_position(self, values, threadhold:int = 300):
-        close_condition = values < threadhold
-        return np.where(close_condition, 0, 1)
-    
     def get_obs(self) -> Dict[str, Any]:
         """Get observation from the environment.
 
@@ -95,7 +91,6 @@ class RobotEnv:
         for camera_id, camera in self.cameras.items():
             name = self._camera_name_id[camera_id]
             image, depth = camera.read()
-            image = np.transpose(image, (2, 0, 1))
             observations[f"{name}_rgb"] = image
             if depth is not None:
                 observations[f"{name}_depth"] = depth
@@ -103,11 +98,21 @@ class RobotEnv:
         robot_obs = self._robot.get_observations()
         assert "joint_positions" in robot_obs
         assert "gripper_position" in robot_obs
-        # observations["joint_positions"] = robot_obs["joint_positions"]
-        observations["gripper_position"] = np.array(self.binarize_gripper_position(robot_obs["gripper_position"], 700))
+        assert "tcp_pose" in robot_obs
+        raw_gripper_position = np.asarray(robot_obs["gripper_position"], dtype=float)
+        observations["gripper_position_raw"] = raw_gripper_position.copy()
+        # Use the same raw-position threshold as recorded gripper actions.
+        observations["gripper_position"] = (raw_gripper_position > 700).astype(float)
 
-        observations["joint_positions"] = np.concatenate((robot_obs["joint_positions"][:6], observations["gripper_position"]), axis=0)
+        observations["joint_positions"] = np.concatenate(
+            (
+                robot_obs["joint_positions"][:6],
+                observations["gripper_position"],
+            ),
+            axis=0,
+        )
         observations["tcp_force"] = robot_obs["tcp_force"]
+        observations["tcp_pose"] = robot_obs["tcp_pose"]
 
         return observations
 

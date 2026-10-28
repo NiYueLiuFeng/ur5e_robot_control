@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 
 class TeleopAgentFactoryTest(unittest.TestCase):
@@ -72,6 +73,27 @@ class TeleopAgentFactoryTest(unittest.TestCase):
                 }
             ],
         )
+
+
+class SpaceMouseOpenTest(unittest.TestCase):
+    def test_explicit_device_path_uses_open_by_path(self):
+        import pyspacemouse
+        from ur5e_control.data_collection.teleop.spacemouse.agent import SpaceMouseAgent
+
+        mouse = object()
+        with patch.object(pyspacemouse, "open_by_path", return_value=mouse) as open_by_path:
+            self.assertIs(
+                SpaceMouseAgent._open_spacemouse(None, "/dev/hidraw8"), mouse
+            )
+        open_by_path.assert_called_once_with("/dev/hidraw8")
+
+    def test_open_failure_identifies_device_and_permissions(self):
+        import pyspacemouse
+        from ur5e_control.data_collection.teleop.spacemouse.agent import SpaceMouseAgent
+
+        with patch.object(pyspacemouse, "open", side_effect=RuntimeError("Failed to open device")):
+            with self.assertRaisesRegex(RuntimeError, r"auto-detected device.*hidraw"):
+                SpaceMouseAgent._open_spacemouse(None, None)
 
 
 if __name__ == "__main__":

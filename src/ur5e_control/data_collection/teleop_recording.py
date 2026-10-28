@@ -22,8 +22,13 @@ def infer_image_shapes_from_env_obs(
     for source_name, target_name in image_key_map.items():
         image = env_obs.get(source_name)
         shape = getattr(image, "shape", None)
-        if shape is not None and len(shape) == 3:
-            image_shapes[target_name] = tuple(int(value) for value in shape) # type: ignore
+        if shape is not None and len(shape) == 2:
+            image_shapes[target_name] = (int(shape[0]), int(shape[1]), 1)
+        elif shape is not None and len(shape) == 3:
+            image_shape = tuple(int(value) for value in shape)
+            if image_shape[0] in (1, 3) and image_shape[-1] not in (1, 3):
+                image_shape = (image_shape[1], image_shape[2], image_shape[0])
+            image_shapes[target_name] = image_shape
     return image_shapes
 
 

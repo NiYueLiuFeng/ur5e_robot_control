@@ -30,7 +30,7 @@ class URRobot:
         self.robot = rtde_control.RTDEControlInterface(
             robot_ip,
             frequency=rtde_frequency,
-            flags=rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP,
+            # flags=rtde_control.RTDEControlInterface.FLAG_USE_EXT_UR_CAP,
         )
         self.r_inter = rtde_receive.RTDEReceiveInterface(robot_ip)
 
@@ -97,6 +97,7 @@ class URRobot:
         return {
             "joint_positions": joints,
             "gripper_position": gripper_pos,
+            "tcp_pose": np.asarray(self.r_inter.getActualTCPPose(), dtype=float),
             "tcp_force": np.asarray(self.r_inter.getActualTCPForce(), dtype=float),
         }
 
@@ -108,5 +109,10 @@ class URRobot:
                 "PGC gripper position must be in [0, 1000], "
                 f"got {gripper_pos}"
             )
+        print(
+            f"[gripper] raw_position={gripper_pos}, "
+            f"gripper_state={int(gripper_pos > 700)}",
+            flush=True,
+        )
         self.pre_gripper_state = gripper_pos
         return float(gripper_pos)
