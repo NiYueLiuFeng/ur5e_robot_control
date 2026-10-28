@@ -95,6 +95,13 @@ vla:
   # max_joint_delta: 0.1
   reset_on_start: true
   threshold: 0.7 ##0.7for block
+  # ws-control 协议：json（默认）、fastwam（msgpack，无握手）或 openpi05
+  model: "json"
+  # 请求体里的 state / 图片字段固定在 src/apps/run_ws_control.py 的
+  # IMAGE_FIELDS / FASTWAM_IMAGE_FIELDS / OPENPI_IMAGE_FIELDS 常量里。
+  # fastwam / openpi05 示例：
+  # model: "fastwam"
+  # model: "openpi05"
 rtc:
   enabled: true
   config:

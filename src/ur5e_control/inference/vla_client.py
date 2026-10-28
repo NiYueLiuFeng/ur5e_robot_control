@@ -23,7 +23,7 @@ class VLAClient:
         self.server_url = server_url
         self.api_key = api_key
         self.timeout_s = float(timeout_s)
-        self._connection_factory = connection_factory or _connect_websocket
+        self._connection_factory = connection_factory or connect_websocket
         self._packer = Packer()
         self._connection = self._connection_factory(
             self.server_url,
@@ -71,7 +71,7 @@ class VLAClient:
         return unpackb(response)
 
 
-def _connect_websocket(server_url: str, api_key: str | None, timeout_s: float) -> Any:
+def connect_websocket(server_url: str, api_key: str | None, timeout_s: float) -> Any:
     try:
         import websockets.sync.client  # type: ignore
     except ImportError as exc:

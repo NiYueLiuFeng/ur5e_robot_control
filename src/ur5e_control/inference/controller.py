@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import atexit
-from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Iterable
 import time
@@ -157,59 +155,11 @@ def build_vla_inference_controller(
     sub_task: str | None = None,
 ) -> VLAInferenceController:
     from ur5e_control.data_collection.tasks import load_task_file
-    from ur5e_control.data_collection.teleop.env import RobotEnv
-    from ur5e_control.hardware import RealSenseCameraServer
-    from ur5e_control.runtime.safety import load_joint_limits
-    from ur5e_control.runtime.transport.robot_zmq import ZMQClientRobot
+    from ur5e_control.runtime.env import build_robot_env
 
     config = runtime_config or load_runtime_config(config_path)
-    # joint_limits_path = resolve_repo_path(config.safety.joint_limits_file)
-    # if not joint_limits_path.exists(): ##lwz
-    #     raise FileNotFoundError(
-    #         f"Safety joint limits file not found: {joint_limits_path}. "
-    #         "Run `uv run calibrate-safety-zone` on the edge laptop first."
-    #     )
-
-    robot_process = Process(
-        target=_serve_robot,
-        kwargs={
-            "robot_ip": config.robot.ip,
-            "gripper_port": config.gripper.port,
-            "gripper_position_tolerance": config.gripper.position_tolerance,
-            "gripper_min_command_interval_s": (config.gripper.min_command_interval_s),
-            "gripper_position_read_interval_s": (
-                config.gripper.position_read_interval_s
-            ),
-            "port": config.robot.zmq_port,
-            "host": config.robot.zmq_host,
-        },
-    )
-    camera_server = None
+    bundle = build_robot_env(config)
     try:
-        robot_process.start()
-        atexit.register(_stop_process, robot_process)
-
-        camera_server = RealSenseCameraServer(
-            hostname=config.camera.hostname,
-            realsense_ids=dict(config.camera.realsense_ids),
-            fps=config.camera.fps,
-            enable_depth=config.camera.enable_depth,
-            depth_options=config.camera.depth_options,
-        )
-        atexit.register(camera_server.stop)
-
-        robot_client = ZMQClientRobot(
-            port=config.robot.zmq_port,
-            host=config.robot.zmq_host,
-        )
-        env = RobotEnv(
-            robot_client,
-            control_rate_hz=config.robot.control_hz,
-            camera_name_id=camera_server.realsense_ids,
-            cameras=camera_server.cameras,
-            # joint_limits=load_joint_limits(joint_limits_path),
-            joint_limits=None,  # lwz: disable joint limits for now
-        )
         task = load_task_file(str(resolve_repo_path(config.task.file)))
         client = VLAClient(
             server_url=config.vla.server_url,
@@ -218,7 +168,7 @@ def build_vla_inference_controller(
             rtc=config.rtc,
         )
         return VLAInferenceController(
-            env=env,
+            env=bundle.env,
             client=client,
             task=task,
             gripper_threadhold=config.vla.threshold,
@@ -234,42 +184,8 @@ def build_vla_inference_controller(
             reset_on_start=config.vla.reset_on_start,
             sub_task=sub_task,
             task_name=task_name,
-            cleanup_callbacks=(
-                camera_server.stop,
-                lambda: _stop_process(robot_process),
-            ),
+            cleanup_callbacks=(bundle.cleanup,),
         )
     except Exception:
-        if camera_server is not None:
-            camera_server.stop()
-        _stop_process(robot_process)
+        bundle.close()
         raise
-
-
-def _serve_robot(
-    *,
-    robot_ip: str,
-    gripper_port: str,
-    gripper_position_tolerance: int,
-    gripper_min_command_interval_s: float,
-    gripper_position_read_interval_s: float,
-    port: int,
-    host: str,
-) -> None:
-    from ur5e_control.hardware import URRobot
-    from ur5e_control.runtime.transport.robot_zmq import ZMQServerRobot
-
-    robot = URRobot(
-        robot_ip=robot_ip,
-        gripper_port=gripper_port,
-        gripper_position_tolerance=gripper_position_tolerance,
-        gripper_min_command_interval_s=gripper_min_command_interval_s,
-        gripper_position_read_interval_s=gripper_position_read_interval_s,
-    )
-    ZMQServerRobot(robot, port=port, host=host).serve()
-
-
-def _stop_process(process: Process) -> None:
-    if process.is_alive():
-        process.terminate()
-        process.join(timeout=2)

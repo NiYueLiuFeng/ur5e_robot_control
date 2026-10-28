@@ -10,12 +10,12 @@ from typing import Any
 
 import numpy as np
 
-from ur5e_control.inference.controller import _serve_robot, _stop_process
 from ur5e_control.inference.flexpi_http import (
     FlexPiHTTPClient,
     FlexPiRequestAdapter,
 )
 from ur5e_control.runtime.config import RuntimeConfig, resolve_repo_path
+from ur5e_control.runtime.env import serve_robot, stop_process
 
 CleanupCallback = Callable[[], None]
 
@@ -204,7 +204,7 @@ def build_flexpi_inference_controller(
         )
 
     robot_process = Process(
-        target=_serve_robot,
+        target=serve_robot,
         kwargs={
             "robot_ip": config.robot.ip,
             "gripper_port": config.gripper.port,
@@ -222,7 +222,7 @@ def build_flexpi_inference_controller(
     camera_server = None
     try:
         robot_process.start()
-        atexit.register(_stop_process, robot_process)
+        atexit.register(stop_process, robot_process)
 
         # FlexPi's DA3 path consumes RGB only.  Don't start an unused raw-depth
         # stream or introduce dual-D455 emitter interference in this entrypoint.
@@ -256,13 +256,13 @@ def build_flexpi_inference_controller(
             seed=seed,
             cleanup_callbacks=(
                 camera_server.stop,
-                lambda: _stop_process(robot_process),
+                lambda: stop_process(robot_process),
             ),
         )
     except Exception:
         if camera_server is not None:
             camera_server.stop()
-        _stop_process(robot_process)
+        stop_process(robot_process)
         raise
 
 
