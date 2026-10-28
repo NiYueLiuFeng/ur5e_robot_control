@@ -80,7 +80,7 @@ vla:
   execute_horizon: 15
   request_timeout_s: 5.0
   reset_on_start: true
-  threadhold: 0.7 ##0.7for block
+  threshold: 0.7 ##0.7for block
 
 
 task:

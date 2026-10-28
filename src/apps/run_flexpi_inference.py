@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--gripper-threshold",
         type=float,
         default=None,
-        help="Override vla.threadhold from the runtime YAML.",
+        help="Override vla.threshold from the runtime YAML.",
     )
     parser.add_argument(
         "--action-rate-hz",
@@ -110,7 +110,7 @@ def main(argv=None) -> None:
         else args.max_joint_delta
     )
     gripper_threshold = (
-        config.vla.threadhold
+        config.vla.threshold
         if args.gripper_threshold is None
         else args.gripper_threshold
     )
@@ -150,7 +150,7 @@ def main(argv=None) -> None:
         )
     if args.execute and gripper_threshold is None:
         raise ValueError(
-            "Robot execution requires vla.threadhold in the runtime YAML or "
+            "Robot execution requires vla.threshold in the runtime YAML or "
             "--gripper-threshold"
         )
     # if args.execute:

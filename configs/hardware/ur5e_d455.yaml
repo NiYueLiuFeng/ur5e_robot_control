@@ -94,7 +94,7 @@ vla:
   request_timeout_s: 600.0
   # max_joint_delta: 0.1
   reset_on_start: true
-  threadhold: 0.7 ##0.7for block
+  threshold: 0.7 ##0.7for block
 rtc:
   enabled: true
   config:

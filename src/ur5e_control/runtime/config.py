@@ -283,7 +283,7 @@ class VLARuntimeConfig:
     request_timeout_s: float = 5.0
     max_joint_delta: float | None = 0.1
     reset_on_start: bool = True
-    threadhold: float | None =  0.7 
+    threshold: float | None = 0.7
 
     def __post_init__(self) -> None:
         if not self.server_url:
@@ -589,6 +589,7 @@ def _load_vla_config(
 ) -> VLARuntimeConfig:
     api_key = data.get("api_key")
     max_joint_delta = data.get("max_joint_delta", 0.1)
+    threshold = data.get("threshold", 0.7)
     return VLARuntimeConfig(
         server_url=str(data.get("server_url", "ws://127.0.0.1:8000")),
         api_key=None if api_key in {None, ""} else str(api_key),
@@ -614,6 +615,9 @@ def _load_vla_config(
         ),
         reset_on_start=_bool_value(
             data.get("reset_on_start", True), "vla.reset_on_start"
+        ),
+        threshold=(
+            None if threshold is None else _float_value(threshold, "vla.threshold")
         ),
     )
 
