@@ -16,6 +16,7 @@ authors = [
 dependencies = [
     "lerobot>=0.4.0",
     "msgpack",
+    "msgpack-numpy",
     "numpy",
     "pynput",
     "opencv-python-headless",
@@ -43,6 +44,7 @@ check-recording-ready = "apps.check_recording_ready:main"
 repair-video-timestamps = "apps.repair_video_timestamps:main"
 record-teleop = "apps.record_teleop:main"
 run-vla-inference = "apps.run_vla_inference:main"
+ws-control = "apps.run_ws_control:main"
 
 [dependency-groups]
 dev = [
