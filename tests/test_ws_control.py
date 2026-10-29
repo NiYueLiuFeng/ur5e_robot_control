@@ -732,5 +732,93 @@ class ResetKeyTest(unittest.TestCase):
         self.assertEqual(len(env.commands), 1)
 
 
+class FakeVideo:
+    def __init__(self, frames):
+        self.has_frames = frames
+        self.frames = []
+        self.saved = 0
+        self.discarded = 0
+
+    def add(self, obs):
+        self.frames.append(obs)
+
+    def save(self):
+        self.saved += 1
+
+    def discard(self):
+        self.discarded += 1
+
+
+class SaveVideoTest(unittest.TestCase):
+    def test_flag_accepts_bare_and_explicit_boolean(self):
+        from apps.run_ws_control import build_parser
+
+        parser = build_parser()
+        self.assertTrue(parser.parse_args(["--save-video"]).save_video)
+        self.assertTrue(parser.parse_args(["--save-video", "true"]).save_video)
+        self.assertFalse(parser.parse_args(["--save-video", "false"]).save_video)
+        self.assertFalse(parser.parse_args([]).save_video)
+
+    def test_run_records_a_frame_per_action(self):
+        from apps.run_ws_control import _run
+
+        connection = FakeConnection(
+            [json.dumps({"action": [[0.1] * 6 + [0.0], [0.2] * 6 + [0.0]]})]
+        )
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+        video = FakeVideo(frames=[])
+
+        executed = _run(
+            env,
+            connection,
+            model="json",
+            vla=make_vla(execute_horizon=2),
+            task="pick",
+            max_steps=2,
+            control_hz=1000.0,
+            video=video,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(video.frames), 2)
+
+    def test_reset_asks_before_saving(self):
+        from apps.run_ws_control import _handle_reset
+
+        env = FakeEnv({"joint_positions": np.zeros(7)})
+        kept = FakeVideo(frames=[object()])
+        with unittest.mock.patch("builtins.input", return_value="y"):
+            _handle_reset(env, np.zeros(7), kept)
+
+        self.assertEqual((kept.saved, kept.discarded), (1, 0))
+        # 复位仍然执行：100 步插值。
+        self.assertEqual(len(env.commands), 100)
+
+        env = FakeEnv({"joint_positions": np.zeros(7)})
+        dropped = FakeVideo(frames=[object()])
+        with unittest.mock.patch("builtins.input", return_value="n"):
+            _handle_reset(env, np.zeros(7), dropped)
+
+        self.assertEqual((dropped.saved, dropped.discarded), (0, 1))
+
+    def test_reset_without_frames_does_not_prompt(self):
+        from apps.run_ws_control import _handle_reset
+
+        env = FakeEnv({"joint_positions": np.zeros(7)})
+        empty = FakeVideo(frames=[])
+
+        with unittest.mock.patch("builtins.input") as ask:
+            _handle_reset(env, np.zeros(7), empty)
+
+        ask.assert_not_called()
+        self.assertEqual((empty.saved, empty.discarded), (0, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

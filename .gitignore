@@ -11,6 +11,7 @@
 *.gif
 data/
 results/
+save_video/
 
 # mac
 *.DS_Store

@@ -436,6 +436,13 @@ values, the six joints must lie within ±2π rad, and each joint may move at mos
 **N** or **T** while the loop runs returns the arm to `robot.reset_joints` and
 restarts the request cycle from the new pose.
 
+Add `--save-video true` to record the episode: each executed action appends one
+frame that merges the third-person and wrist views side by side, written to
+`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`. On an **N**/**T** reset
+the terminal asks `Save the recorded episode video? [y/N]`; only `y` keeps the
+file, anything else discards it before the arm re-homes. Unconfirmed recordings
+are deleted on exit, and `--dry-run` never records.
+
 `--model` also selects one of the other delivery protocols:
 
 | `--model` | Transport | Action contract | Executes on UR5e |

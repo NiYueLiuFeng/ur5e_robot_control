@@ -421,6 +421,12 @@ PYTHONPATH=src python -m apps.run_ws_control \
 模型动作按数据集帧率（15 Hz）节流，而不是 100 Hz 控制频率。循环运行中按
 **N** 或 **T**，机械臂会回到 `robot.reset_joints`，并按新位姿重新开始请求。
 
+加 `--save-video true` 可录制本次 episode：每条 action 执行后追加一帧，把
+第三人称和腕部画面左右拼接，写到
+`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`。按 **N**/**T** 复位时
+终端会询问 `Save the recorded episode video? [y/N]`，回答 `y` 才保留文件，
+其余回答在回位前删除；退出时未确认的录像也会被删除。`--dry-run` 下不录制。
+
 `--model` 还可选择其他模型的交付协议：
 
 | `--model` | 传输 | 动作语义 | 能否直接执行 |

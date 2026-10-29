@@ -215,7 +215,8 @@ uv run ws-control \
 5. 终端提示 `press ENTER to start policy control loop...`，按回车开始；
 6. 循环：取观测 → 请求 → 校验 → 执行 action；
 7. 运行中按 **N** 或 **T**，机械臂回到 `robot.reset_joints`（复位），并丢弃
-   当前动作块剩余动作、按新位姿重新请求；
+   当前动作块剩余动作、按新位姿重新请求；加了 `--save-video` 时，复位前会先
+   询问是否保存本次 episode 的录像（见 5.1）；
 8. `Ctrl+C` 退出，或达到 `--max-steps` 自动停止。
 
 复位键需要图形环境（`pynput`）；在无显示器的 SSH 会话里监听会失效，程序只
@@ -235,6 +236,26 @@ uv run ws-control \
 | `--dry-run` | 只请求并打印动作，不下发；EEF 模型必须用它 |
 | `--action-hz` | 覆盖动作下发帧率（Hz） |
 | `--max-joint-delta` | 覆盖单关节限幅（rad），`none` 表示关闭 |
+| `--save-video [BOOL]` | 录制单次 episode 的录像，`true`/不带值开启，默认关闭（见 5.1） |
+
+### 5.1 保存 episode 视频
+
+```bash
+uv run ws-control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --server-url ws://127.0.0.1:8000 \
+  --save-video true
+```
+
+- 每条 action 执行后取一帧，把第三人称（`third_left_top_rgb`）和腕部
+  （`wrist_rgb`）两路画面左右拼接到同一张图上，按动作帧率写盘。
+- 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，同一分钟内按
+  `video_1.mp4`、`video_2.mp4` 递增。
+- 按 **N** / **T** 复位时，终端会询问
+  `Save the recorded episode video? [y/N]`：回答 `y` 保留文件，其他（含直接
+  回车）丢弃并删除半截文件，然后机械臂才回初始位姿。下一段 episode 从头录制。
+- `Ctrl+C` / `--max-steps` 结束时不会保存未确认的录像，避免留下损坏的 mp4。
+- `--dry-run` 下不录制（没有真实动作）。
 
 首次上真机建议：
 

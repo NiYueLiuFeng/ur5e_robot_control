@@ -22,7 +22,9 @@ in preview mode (``--dry-run``); the delivered UR5 checkpoints are FastWAM
 
 Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
-pressing N or T moves the arm back to ``robot.reset_joints``.
+pressing N or T moves the arm back to ``robot.reset_joints``. With
+``--save-video`` that reset first asks whether to keep the episode's merged
+third-person + wrist recording.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from ur5e_control.data_collection.tasks import load_task_file
 from ur5e_control.inference.websocket import connect_websocket
 from ur5e_control.runtime.config import load_runtime_config, resolve_repo_path
 from ur5e_control.runtime.env import build_robot_env
+from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
 MODELS = ("json", "fastwam", "pi05", "lingbot", "flexpi", "openwam")
 # 旧名字保留，等价于 pi05。
@@ -189,6 +192,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Max change (rad) per joint between two commands; 'none' disables it.",
     )
+    parser.add_argument(
+        "--save-video",
+        nargs="?",
+        const=True,
+        default=False,
+        type=_str2bool,
+        metavar="BOOL",
+        help="Record one episode's merged third-person + wrist video and ask "
+        "whether to keep it when N/T resets the arm.",
+    )
     return parser
 
 
@@ -211,6 +224,12 @@ def main(argv: list[str] | None = None) -> None:
         _optional_float(args.max_joint_delta)
         if args.max_joint_delta is not None
         else vla.max_joint_delta
+    )
+    # 视频只在真机执行时录制；目录在录到第一帧时才创建。
+    video = (
+        EpisodeVideoRecorder(model=model, fps=action_hz or 15.0)
+        if args.save_video and not dry_run
+        else None
     )
 
     # 1. 启动机器人 ZMQ 子进程和 RealSense 相机服务。
@@ -256,12 +275,16 @@ def main(argv: list[str] | None = None) -> None:
             action_hz=action_hz,
             max_joint_delta=max_joint_delta,
             reset_joints=config.robot.reset_joints,
+            video=video,
             dry_run=dry_run,
         )
         print(f"Stopped after handling {steps} action(s).")
     except KeyboardInterrupt:
         print("Stopping UR5e policy control.")
     finally:
+        # 未按 y 保存的录像在退出时删除，避免留下半截 mp4。
+        if video is not None:
+            video.discard()
         # 正常结束、报错或 Ctrl+C 都要断开连接并释放机器人/相机进程。
         connection.close()
         bundle.close()
@@ -279,6 +302,7 @@ def _run(
     action_hz: float | None = None,
     max_joint_delta: float | None = None,
     reset_joints: Any = None,
+    video: EpisodeVideoRecorder | None = None,
     dry_run: bool = False,
 ) -> int:
     """Run the request loop and return how many actions were handled."""
@@ -301,7 +325,7 @@ def _run(
     try:
         while max_steps is None or executed < max_steps:
             if reset_key.take():
-                _reset_to_start(env, reset_joints)
+                _handle_reset(env, reset_joints, video)
             # 每轮重新取一次观测，交给 get_model_body 组装请求。
             obs = env.get_obs()
             # 限幅参考：本轮开始时的实际关节角，逐条下发后更新为刚下发的目标。
@@ -329,7 +353,7 @@ def _run(
             for action in actions:
                 if reset_key.take():
                     # 复位后丢弃剩下的动作，下一轮按新位姿重新请求。
-                    _reset_to_start(env, reset_joints)
+                    _handle_reset(env, reset_joints, video)
                     break
                 started = time.monotonic()
                 if dry_run:
@@ -359,6 +383,9 @@ def _run(
                     )
                     # RobotEnv.step 会做安全限位，并按 control_hz 控制下发节奏。
                     env.step(command)
+                    if video is not None:
+                        # 每条动作后取一帧，recorder 内部按 fps 抽帧。
+                        video.add(env.get_obs())
                     if period:
                         # 模型动作按数据集帧率给出，不能按 control_hz 抢跑。
                         remaining = period - (time.monotonic() - started)
@@ -855,6 +882,25 @@ def _robot_command(
     return command
 
 
+def _handle_reset(
+    env: Any,
+    reset_joints: Any,
+    video: EpisodeVideoRecorder | None,
+) -> None:
+    """Ask whether to keep the recorded episode, then re-home the arm."""
+
+    if video is not None and video.has_frames:
+        try:
+            answer = input("Save the recorded episode video? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer in {"y", "yes"}:
+            video.save()
+        else:
+            video.discard()
+    _reset_to_start(env, reset_joints)
+
+
 def _reset_to_start(env: Any, reset_joints: Any) -> None:
     """Move the arm back to `robot.reset_joints` (N/T key)."""
 
@@ -886,6 +932,19 @@ def _optional_float(value: Any) -> float | None:
     if isinstance(value, str) and value.strip().lower() in {"", "none", "null"}:
         return None
     return float(value)
+
+
+def _str2bool(value: Any) -> bool:
+    """Let `--save-video true` work like `--save-video`."""
+
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {value!r}")
 
 
 if __name__ == "__main__":
