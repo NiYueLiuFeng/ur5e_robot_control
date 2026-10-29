@@ -19,6 +19,7 @@ dependencies = [
     "msgpack-numpy",
     "numpy",
     "pynput",
+    "pyserial",
     "opencv-python-headless",
     "pyrealsense2",
     "pyyaml",

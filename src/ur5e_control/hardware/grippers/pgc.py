@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -95,8 +96,27 @@ class PGCGripper:
             time.sleep(0.2)
 
 
+def _default_sdk_path() -> Path:
+    """Repo-vendored SDK: src/dh_gripper, next to the ur5e_control package."""
+    return Path(__file__).resolve().parents[3] / "dh_gripper"
+
+
 def _load_dh_gripper_module(sdk_path: str | None = None) -> Any:
-    path = sdk_path or os.environ.get("UR5E_DH_GRIPPER_SDK_PATH")
+    candidates = [
+        sdk_path or os.environ.get("UR5E_DH_GRIPPER_SDK_PATH"),
+        str(_default_sdk_path()),
+    ]
+    # Prefer the first directory that actually contains the module; a stale or
+    # unrelated UR5E_DH_GRIPPER_SDK_PATH (e.g. another project's SDK) must not
+    # shadow the vendored copy.
+    path = next(
+        (
+            str(candidate)
+            for candidate in candidates
+            if candidate and (Path(candidate) / "dh_modbus_gripper.py").is_file()
+        ),
+        None,
+    )
     if path and path not in sys.path:
         sys.path.insert(0, path)
 
@@ -105,7 +125,8 @@ def _load_dh_gripper_module(sdk_path: str | None = None) -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "Cannot import dh_modbus_gripper. Install the DH gripper SDK or set "
-            "UR5E_DH_GRIPPER_SDK_PATH to its Python module directory."
+            "UR5E_DH_GRIPPER_SDK_PATH to its Python module directory. "
+            f"Original error: {exc}"
         ) from exc
     return dh_modbus_gripper
 
