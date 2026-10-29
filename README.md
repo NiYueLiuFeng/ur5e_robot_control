@@ -153,7 +153,7 @@ The full operator guide is here:
 | `uv run calibrate-safety-zone` | Generate UR5e joint safety limits through teleoperation |
 | `uv run record-teleop` | Collect LeRobot v3 teleoperation episodes |
 | `uv run run-vla-inference` | Run UR5e control from a CloudRobo-VLA WebSocket server |
-| `uv run ws-control` | Run UR5e control from a JSON-over-WebSocket policy server |
+| `uv run ws-control` | Run UR5e control from a WebSocket policy server (JSON, msgpack or msgpack-numpy) |
 
 ## Hardware Bring-Up
 
@@ -374,8 +374,9 @@ If the VLA server uses a different CloudRobo dataset mixture schema, update
 
 ## JSON Policy Control
 
-`ws-control` is a smaller, JSON-only loop for a custom policy server. Each step
-uploads the live observation:
+`ws-control` is a small control loop for a custom policy server; the default
+`json` protocol is described here, other protocols in the table below. Each
+step uploads the live observation:
 
 ```json
 {
@@ -393,7 +394,7 @@ The server replies with an action chunk:
 ```
 
 Adjust the wire format in `src/apps/run_ws_control.py`
-(`get_model_body` / `_parse_actions` / `_request`).
+(`get_model_body` / `_prepare_server` / `_request` / `_parse_actions`).
 
 ```bash
 uv run ws-control \
@@ -428,17 +429,35 @@ console script in `pyproject.toml`, so both forms accept the same options.
 `vla.execute_horizon` actions are executed per response. The gripper value is
 binarized with `vla.threshold` and sent as 0 or 1000.
 
-Use `--model fastwam` (or `vla.model: fastwam`) to speak FastWAM's
-msgpack/WebSocket protocol. That path sends raw JPEG bytes and a joint-state
-vector directly as an `infer` frame (no handshake; the token is appended to the
-URL), then executes the action chunk on the robot exactly like the `json` path
-(gripper binarized with `vla.threshold`). Request fields are fixed in
-`run_ws_control.py` (`IMAGE_FIELDS`, `FASTWAM_IMAGE_FIELDS`).
+Every action is validated before it reaches `servoJ`: it must be 7 finite
+values, the six joints must lie within ±2π rad, and each joint may move at most
+`vla.max_joint_delta` per command. Model actions are paced at the dataset rate
+(15 Hz for the model protocols) instead of the 100 Hz control loop.
 
-Use `--model openpi05` for OpenPI 0.5's msgpack-numpy protocol. The body carries
-CHW uint8 image arrays, a 7-value float32 single-arm state and a `prompt`;
-returned actions are parsed and logged without commanding the robot. Its field
-mapping lives in `OPENPI_IMAGE_FIELDS`.
+`--model` also selects one of the other delivery protocols:
+
+| `--model` | Transport | Action contract | Executes on UR5e |
+| --- | --- | --- | --- |
+| `json` | JSON text | 6 joints + gripper | yes |
+| `fastwam` | msgpack | 6 joints + gripper (`autogen_mixed_ur5`) | yes |
+| `lingbot` | msgpack-numpy | 6 joints + gripper (`ur5` profile) | yes |
+| `openwam` | JSON text | 6 joints + gripper (`ur5` dataset) | yes |
+| `pi05` (`openpi05`) | msgpack-numpy | EEF pose + gripper | no, `--dry-run` only |
+| `flexpi` | msgpack-numpy | 13-dim HS13 EEF state | no, `--dry-run` only |
+
+`fastwam` sends raw JPEG bytes and a joint-state vector directly as an `infer`
+frame (no handshake; the token is appended to the URL). `lingbot` consumes the
+connect metadata, sends a `{"reset": true, "prompt": ...}` frame, and drops the
+zero-context action block from each `(dim, chunk, per_frame)` response.
+`openwam` completes a `ping` → `reset` handshake, refuses non-`joint`
+representations, and sends base64 PNG images. `pi05` and `flexpi` consume the
+OpenPI metadata frame and use HWC uint8 images; their checkpoints target other
+arms, so the app refuses to drive the robot with them unless `--dry-run` is
+given.
+
+Field mappings live in `run_ws_control.py` (`IMAGE_FIELDS`,
+`FASTWAM_IMAGE_FIELDS`, `PI05_IMAGE_FIELDS`, `LINGBOT_IMAGE_FIELDS`,
+`FLEXPI_IMAGE_FIELDS`, `OPENWAM_IMAGE_FIELDS`).
 
 ## Project Layout
 

@@ -13,6 +13,10 @@ DEFAULT_VLA_IMAGE_KEY_MAP = {
     "third_front_rgb": "observation.images.third_front_image",
     "wrist_rgb": "observation.images.wrist_image",
 }
+# ws-control 支持的策略服务协议。
+VLA_MODELS = frozenset({"json", "fastwam", "pi05", "lingbot", "flexpi", "openwam"})
+# 旧配置里的名字，统一成规范名。
+VLA_MODEL_ALIASES = {"openpi05": "pi05"}
 
 
 @dataclass(frozen=True)
@@ -284,8 +288,10 @@ class VLARuntimeConfig:
     max_joint_delta: float | None = 0.1
     reset_on_start: bool = True
     threshold: float | None = 0.7
-    # ws-control 协议: "json"（简单 JSON）、"fastwam" 或 "openpi05"。
+    # ws-control 协议: json / fastwam / lingbot / openwam / pi05 / flexpi。
     model: str = "json"
+    # 动作下发帧率；None 表示用协议对应的默认值，json 则跟随控制频率。
+    action_hz: float | None = None
 
     def __post_init__(self) -> None:
         if not self.server_url:
@@ -307,9 +313,14 @@ class VLARuntimeConfig:
             raise ValueError("vla.request_timeout_s must be positive")
         if self.max_joint_delta is not None and self.max_joint_delta < 0:
             raise ValueError("vla.max_joint_delta must be non-negative")
+        if self.action_hz is not None and self.action_hz <= 0:
+            raise ValueError("vla.action_hz must be positive")
         model = self.model.strip().lower()
-        if model not in {"json", "fastwam", "openpi05"}:
-            raise ValueError("vla.model must be 'json', 'fastwam' or 'openpi05'")
+        model = VLA_MODEL_ALIASES.get(model, model)
+        if model not in VLA_MODELS:
+            raise ValueError(
+                "vla.model must be one of: " + ", ".join(sorted(VLA_MODELS))
+            )
         object.__setattr__(self, "action_space", action_space)
         object.__setattr__(self, "model", model)
         object.__setattr__(
@@ -626,6 +637,11 @@ def _load_vla_config(
             None if threshold is None else _float_value(threshold, "vla.threshold")
         ),
         model=str(data.get("model", "json")),
+        action_hz=(
+            None
+            if data.get("action_hz") is None
+            else _float_value(data["action_hz"], "vla.action_hz")
+        ),
     )
 
 
@@ -880,6 +896,18 @@ def _apply_env_overrides(
             reset_on_start=_bool_value(
                 environ["UR5E_VLA_RESET_ON_START"],
                 "UR5E_VLA_RESET_ON_START",
+            ),
+        )
+    if "UR5E_VLA_MODEL" in environ:
+        vla = replace(vla, model=environ["UR5E_VLA_MODEL"])
+    if "UR5E_VLA_ACTION_HZ" in environ:
+        raw_hz = environ["UR5E_VLA_ACTION_HZ"].strip()
+        vla = replace(
+            vla,
+            action_hz=(
+                None
+                if raw_hz.lower() in {"", "none", "null"}
+                else _float_value(raw_hz, "UR5E_VLA_ACTION_HZ")
             ),
         )
 

@@ -92,16 +92,24 @@ vla:
   action_space: "abs"
   execute_horizon: 15
   request_timeout_s: 600.0
-  # max_joint_delta: 0.1
+  # 每条动作之间单关节最大变化量（rad）。写成空值或 none 表示不限幅。
+  max_joint_delta: 0.1
   reset_on_start: true
   threshold: 0.7 ##0.7for block
-  # ws-control 协议：json（默认）、fastwam（msgpack，无握手）或 openpi05
+  # ws-control 协议：json（默认）、fastwam、lingbot、openwam、
+  # pi05（旧名 openpi05）、flexpi。pi05 / flexpi 只能配合 --dry-run 预览。
   model: "json"
+  # 动作下发帧率（Hz）。留空表示用协议默认值：json 跟随 robot.control_hz，
+  # 其余模型按其训练帧率（15 Hz）下发。
+  # action_hz: 15
   # 请求体里的 state / 图片字段固定在 src/apps/run_ws_control.py 的
-  # IMAGE_FIELDS / FASTWAM_IMAGE_FIELDS / OPENPI_IMAGE_FIELDS 常量里。
-  # fastwam / openpi05 示例：
+  # IMAGE_FIELDS / FASTWAM_IMAGE_FIELDS / PI05_IMAGE_FIELDS /
+  # LINGBOT_IMAGE_FIELDS / FLEXPI_IMAGE_FIELDS / OPENWAM_IMAGE_FIELDS 常量里。
+  # 示例：
   # model: "fastwam"
-  # model: "openpi05"
+  # model: "lingbot"
+  # model: "openwam"
+  # model: "pi05"
 rtc:
   enabled: true
   config:

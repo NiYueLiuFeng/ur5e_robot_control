@@ -248,7 +248,7 @@ class FastWAMProtocolTest(unittest.TestCase):
             }
         )
 
-        with self.assertRaisesRegex(ValueError, "7-value action"):
+        with self.assertRaisesRegex(ValueError, "7-dim single-arm UR5 actions"):
             _run(
                 env,
                 connection,
@@ -258,6 +258,34 @@ class FastWAMProtocolTest(unittest.TestCase):
                 max_steps=1,
                 control_hz=1000.0,
             )
+        self.assertEqual(env.commands, [])
+
+    def test_dry_run_warns_on_non_ur5_action_width(self):
+        from apps.run_ws_control import _pack, _run
+
+        connection = FakeConnection(
+            [_pack({"type": "actions", "actions": [[0.1] * 13]})]
+        )
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        executed = _run(
+            env,
+            connection,
+            model="fastwam",
+            vla=make_vla(execute_horizon=1),
+            task="plug",
+            max_steps=1,
+            control_hz=1000.0,
+            dry_run=True,
+        )
+
+        self.assertEqual(executed, 1)
         self.assertEqual(env.commands, [])
 
 
@@ -271,29 +299,61 @@ class OpenPI05ProtocolTest(unittest.TestCase):
             "wrist_rgb": np.full((8, 6, 3), 255, dtype=np.uint8),
         }
 
-        body = get_model_body(obs, model="openpi05", task="pick the block")
+        body = get_model_body(obs, model="pi05", task="pick the block")
 
         self.assertEqual(
-            set(body["images"]),
-            {"cam_high", "cam_left_wrist", "cam_right_wrist"},
+            set(body),
+            {
+                "observation.state",
+                "observation.images.front",
+                "observation.images.wrist",
+                "prompt",
+            },
         )
-        for image in body["images"].values():
-            self.assertEqual(image.shape, (3, 8, 6))
-            self.assertEqual(image.dtype, np.uint8)
-        self.assertEqual(body["state"].shape, (7,))
-        self.assertEqual(body["state"].dtype, np.float32)
-        np.testing.assert_array_equal(body["state"], np.arange(7))
+        for name in ("observation.images.front", "observation.images.wrist"):
+            self.assertEqual(body[name].shape, (8, 6, 3))
+            self.assertEqual(body[name].dtype, np.uint8)
+        self.assertEqual(body["observation.state"].shape, (7,))
+        self.assertEqual(body["observation.state"].dtype, np.float32)
+        np.testing.assert_array_equal(body["observation.state"], np.arange(7))
         self.assertEqual(body["prompt"], "pick the block")
+
+    def test_openpi05_alias_matches_pi05(self):
+        from apps.run_ws_control import _normalize_model, get_model_body
+
+        obs = {
+            "joint_positions": np.arange(7, dtype=float),
+            "third_left_top_rgb": np.zeros((8, 6, 3), dtype=np.uint8),
+            "wrist_rgb": np.zeros((8, 6, 3), dtype=np.uint8),
+        }
+
+        self.assertEqual(_normalize_model("openpi05"), "pi05")
+        alias = get_model_body(obs, model="openpi05", task="pick")
+        canonical = get_model_body(obs, model="pi05", task="pick")
+        self.assertEqual(set(alias), set(canonical))
 
     def test_parse_actions_reads_openpi_chunk(self):
         from apps.run_ws_control import _parse_actions
 
         actions = _parse_actions(
             {"actions": np.zeros((3, 7), dtype=np.float32)},
-            model="openpi05",
+            model="pi05",
         )
 
         self.assertEqual(actions.shape, (3, 7))
+
+    @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
+    def test_prepare_server_consumes_metadata(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [msgpack_numpy.packb({"server": "openpi", "action_dim": 7})]
+        )
+
+        _prepare_server(connection, model="pi05", task="pick")
+
+        self.assertEqual(connection.sent, [])
+        self.assertEqual(connection.responses, [])
 
     @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
     def test_request_round_trips_numpy_body(self):
@@ -316,14 +376,14 @@ class OpenPI05ProtocolTest(unittest.TestCase):
             ]
         )
 
-        response = _request(connection, body, model="openpi05")
+        response = _request(connection, body, model="pi05")
 
         sent = msgpack_numpy.unpackb(connection.sent[0])
         np.testing.assert_array_equal(sent["state"], body["state"])
         self.assertEqual(response["actions"].shape, (2, 7))
 
     @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
-    def test_run_parses_actions_without_commanding_robot(self):
+    def test_dry_run_prints_actions_without_commanding_robot(self):
         from apps.run_ws_control import _run
 
         connection = FakeConnection(
@@ -340,15 +400,241 @@ class OpenPI05ProtocolTest(unittest.TestCase):
         executed = _run(
             env,
             connection,
-            model="openpi05",
+            model="pi05",
             vla=make_vla(execute_horizon=1),
             task="pick",
             max_steps=1,
             control_hz=1000.0,
+            dry_run=True,
         )
 
         self.assertEqual(executed, 1)
         self.assertEqual(env.commands, [])
+
+    def test_eef_model_refuses_to_drive_the_robot(self):
+        from apps.run_ws_control import _ensure_executable
+
+        with self.assertRaisesRegex(ValueError, "absolute 6-joint"):
+            _ensure_executable("pi05", dry_run=False)
+        with self.assertRaisesRegex(ValueError, "absolute 6-joint"):
+            _ensure_executable("flexpi", dry_run=False)
+        _ensure_executable("pi05", dry_run=True)
+        _ensure_executable("fastwam", dry_run=False)
+
+
+class LingBotProtocolTest(unittest.TestCase):
+    def setUp(self):
+        if msgpack_numpy is None:
+            self.skipTest("msgpack-numpy is not installed")
+        self.obs = {
+            "joint_positions": np.arange(7, dtype=float),
+            "third_left_top_rgb": np.zeros((8, 6, 3), dtype=np.uint8),
+            "wrist_rgb": np.zeros((8, 6, 3), dtype=np.uint8),
+        }
+
+    def test_body_uses_lingbot_camera_keys(self):
+        from apps.run_ws_control import get_model_body
+
+        body = get_model_body(self.obs, model="lingbot", task="plug the charger")
+
+        self.assertEqual(set(body), {"obs", "prompt"})
+        self.assertEqual(
+            set(body["obs"]),
+            {"observation.images.third_person", "observation.images.wrist"},
+        )
+        for image in body["obs"].values():
+            self.assertEqual(image.shape, (8, 6, 3))
+        self.assertEqual(body["prompt"], "plug the charger")
+
+    def test_prepare_server_consumes_metadata_and_resets(self):
+        from apps.run_ws_control import _prepare_server, _unpack_numpy
+
+        connection = FakeConnection(
+            [
+                msgpack_numpy.packb({"frame_chunk_size": 2}),
+                msgpack_numpy.packb({}),
+            ]
+        )
+
+        _prepare_server(connection, model="lingbot", task="plug")
+
+        self.assertEqual(len(connection.sent), 1)
+        self.assertEqual(
+            _unpack_numpy(connection.sent[0]),
+            {"reset": True, "prompt": "plug"},
+        )
+
+    def test_parse_drops_the_conditioning_frame(self):
+        from apps.run_ws_control import _parse_actions
+
+        raw = np.zeros((7, 2, 3), dtype=np.float32)
+        raw[:, 0, :] = 99.0  # context block produced from zero conditioning
+        raw[:, 1, :] = np.arange(3, dtype=np.float32)
+
+        actions = _parse_actions({"action": raw}, model="lingbot")
+
+        self.assertEqual(actions.shape, (3, 7))
+        self.assertFalse(np.any(actions == 99.0))
+        np.testing.assert_array_equal(actions[0], np.zeros(7))
+
+    def test_run_executes_lingbot_actions(self):
+        from apps.run_ws_control import _run
+
+        raw = np.zeros((7, 2, 2), dtype=np.float32)
+        raw[:6, 1, 0] = 0.1
+        raw[6, 1, 0] = 0.9
+        raw[6, 1, 1] = 0.1
+        connection = FakeConnection([msgpack_numpy.packb({"action": raw})])
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="lingbot",
+            vla=make_vla(execute_horizon=2),
+            task="plug",
+            max_steps=2,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(env.commands), 2)
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
+
+
+class OpenWAMProtocolTest(unittest.TestCase):
+    def setUp(self):
+        self.obs = {
+            "joint_positions": np.arange(7, dtype=float),
+            "third_left_top_rgb": np.zeros((8, 6, 3), dtype=np.uint8),
+            "wrist_rgb": np.full((8, 6, 3), 255, dtype=np.uint8),
+        }
+
+    def test_body_uses_openwam_image_slots(self):
+        from apps.run_ws_control import get_model_body
+
+        body = get_model_body(self.obs, model="openwam", task="pick the pen")
+
+        self.assertEqual(body["type"], "obs")
+        self.assertEqual(
+            set(body["images"]),
+            {"head_camera", "left_wrist_camera", "right_wrist_camera"},
+        )
+        self.assertIsNone(body["images"]["right_wrist_camera"])
+        self.assertTrue(
+            base64.b64decode(body["images"]["head_camera"]).startswith(b"\x89PNG")
+        )
+        self.assertEqual(len(body["state"]), 7)
+        self.assertEqual(body["prompt"], "pick the pen")
+
+    def test_prepare_server_pings_and_resets(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [
+                json.dumps(
+                    {
+                        "type": "pong",
+                        "representation": "joint",
+                        "gripper_convention": "0_closed_1_open",
+                    }
+                ),
+                json.dumps({"type": "reset_ack"}),
+            ]
+        )
+
+        _prepare_server(connection, model="openwam", task="pick")
+
+        self.assertEqual(
+            [json.loads(frame) for frame in connection.sent],
+            [{"type": "ping"}, {"type": "reset"}],
+        )
+
+    def test_prepare_server_rejects_eef_representation(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [json.dumps({"type": "pong", "representation": "eef"})]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "joint"):
+            _prepare_server(connection, model="openwam", task="pick")
+
+    def test_request_raises_on_error_frame(self):
+        from apps.run_ws_control import _request
+
+        connection = FakeConnection(
+            [json.dumps({"type": "error", "code": "NO_ACTION", "message": "warmup"})]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "NO_ACTION"):
+            _request(connection, {"type": "obs"}, model="openwam")
+
+    def test_run_executes_returned_action(self):
+        from apps.run_ws_control import _run
+
+        connection = FakeConnection(
+            [
+                json.dumps(
+                    {
+                        "type": "action",
+                        "action": [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]],
+                    }
+                )
+            ]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="openwam",
+            vla=make_vla(execute_horizon=2),
+            task="pick",
+            max_steps=2,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual([command[-1] for command in env.commands], [1000.0, 0.0])
+
+
+class RobotCommandTest(unittest.TestCase):
+    def test_command_binarizes_gripper(self):
+        from apps.run_ws_control import _robot_command
+
+        command = _robot_command(np.array([0.0] * 6 + [0.9]), 0.7)
+
+        self.assertEqual(command.shape, (7,))
+        self.assertEqual(command[-1], 1000.0)
+
+    def test_command_clamps_joint_delta(self):
+        from apps.run_ws_control import _robot_command
+
+        action = np.array([1.0] * 6 + [0.0])
+        command = _robot_command(
+            action,
+            0.7,
+            reference=np.zeros(6),
+            max_joint_delta=0.1,
+        )
+
+        np.testing.assert_allclose(command[:6], np.full(6, 0.1))
+
+    def test_command_rejects_non_finite_action(self):
+        from apps.run_ws_control import _robot_command
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            _robot_command(np.array([np.nan] * 6 + [0.0]), 0.7)
+
+    def test_command_rejects_eef_pose_as_joints(self):
+        from apps.run_ws_control import _robot_command
+
+        # A 6-D pose plus gripper would otherwise be sent straight to servoJ.
+        pose = np.array([0.5, -0.2, 0.3, 3.1, -0.2, 0.1, 0.0])
+        with self.assertRaisesRegex(ValueError, "joint command"):
+            _robot_command(pose * 3.0, 0.7)
 
 
 if __name__ == "__main__":

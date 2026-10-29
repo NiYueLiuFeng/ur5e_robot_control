@@ -114,6 +114,8 @@ class RuntimeConfigTest(unittest.TestCase):
                 "UR5E_VLA_REQUEST_TIMEOUT_S": "8.5",
                 "UR5E_VLA_MAX_JOINT_DELTA": "0.04",
                 "UR5E_VLA_RESET_ON_START": "false",
+                "UR5E_VLA_MODEL": "openpi05",
+                "UR5E_VLA_ACTION_HZ": "15",
             }
         )
 
@@ -161,6 +163,8 @@ class RuntimeConfigTest(unittest.TestCase):
         self.assertEqual(config.vla.request_timeout_s, 8.5)
         self.assertEqual(config.vla.max_joint_delta, 0.04)
         self.assertFalse(config.vla.reset_on_start)
+        self.assertEqual(config.vla.model, "pi05")
+        self.assertEqual(config.vla.action_hz, 15.0)
 
     def test_invalid_lerobot_fps_is_rejected(self):
         from dataclasses import replace
@@ -185,6 +189,30 @@ class RuntimeConfigTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "vla.action_space"):
             replace(VLARuntimeConfig(), action_space="joint_teleport")
+
+    def test_vla_model_alias_is_normalized(self):
+        from dataclasses import replace
+
+        from ur5e_control.runtime.config import VLARuntimeConfig
+
+        self.assertEqual(replace(VLARuntimeConfig(), model="openpi05").model, "pi05")
+        self.assertEqual(replace(VLARuntimeConfig(), model="LingBot").model, "lingbot")
+
+    def test_unknown_vla_model_is_rejected(self):
+        from dataclasses import replace
+
+        from ur5e_control.runtime.config import VLARuntimeConfig
+
+        with self.assertRaisesRegex(ValueError, "vla.model"):
+            replace(VLARuntimeConfig(), model="gr00t")
+
+    def test_vla_action_hz_must_be_positive(self):
+        from dataclasses import replace
+
+        from ur5e_control.runtime.config import VLARuntimeConfig
+
+        with self.assertRaisesRegex(ValueError, "vla.action_hz"):
+            replace(VLARuntimeConfig(), action_hz=0.0)
 
     def test_non_ur5e_robot_name_is_rejected(self):
         from dataclasses import replace

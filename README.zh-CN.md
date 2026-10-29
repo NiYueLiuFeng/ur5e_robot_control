@@ -31,7 +31,8 @@
   UR5e 执行回路
 - 机器人与相机服务之间的 ZMQ 进程边界，带超时、请求套接字恢复和
   最新帧相机缓存
-- 新增 `ws-control`：支持 JSON / FastWAM / OpenPI 0.5 三种协议的策略控制入口
+- 新增 `ws-control`：支持 JSON / FastWAM / LingBot-VA / OpenWAM / OpenPI 0.5 /
+  Flex-π 协议的策略控制入口，且只执行 7 维单臂关节动作
 
 重要验证事项：
 
@@ -152,7 +153,7 @@ vla:
 | `uv run calibrate-safety-zone` | 通过遥操作生成 UR5e 关节安全限位 |
 | `uv run record-teleop` | 采集 LeRobot v3 遥操作数据 |
 | `uv run run-vla-inference` | 通过 CloudRobo-VLA WebSocket 服务控制 UR5e |
-| `uv run ws-control` | 通过 JSON-over-WebSocket 策略服务控制 UR5e |
+| `uv run ws-control` | 通过 WebSocket 策略服务（JSON / msgpack / msgpack-numpy）控制 UR5e |
 
 ## 硬件联调
 
@@ -381,7 +382,7 @@ VLA 推理会直接从实时环境观测中读取图像键，并映射到上面�
 ```
 
 如需调整实际报文格式，修改 `src/apps/run_ws_control.py`
-（`get_model_body` / `_parse_actions` / `_request`）。
+（`get_model_body` / `_prepare_server` / `_request` / `_parse_actions`）。
 
 ```bash
 uv run ws-control \
@@ -415,27 +416,48 @@ PYTHONPATH=src python -m apps.run_ws_control \
 每个响应会执行 `vla.execute_horizon` 条动作。夹爪值使用 `vla.threshold` 二值化后
 以 0 或 1000 下发。
 
-使用 `--model fastwam`（或 `vla.model: fastwam`）可对接 FastWAM 的
-msgpack/WebSocket 协议。该路径把原始 JPEG 字节和关节状态向量直接作为 `infer`
-帧发送（无握手，token 追加在 URL 中），然后像 `json` 路径一样把动作块下发到机器人
-（夹爪用 `vla.threshold` 二值化）。请求字段固定在 `run_ws_control.py` 的
-`IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS` 中。
+每条动作在下发前都会校验：必须是 7 维（单臂 UR5 = 6 关节 + 夹爪）有限值，
+6 个关节值在 ±2π rad 内，且单关节每次变化不超过 `vla.max_joint_delta`。
+模型动作按数据集帧率（15 Hz）节流，而不是 100 Hz 控制频率。
 
-使用 `--model openpi05` 可对接 OpenPI 0.5 的 msgpack-numpy 协议。请求体包含 CHW
-uint8 图像数组、7 维 float32 单臂状态和 `prompt`；返回动作同样只解析打印，**不**下发
-到机器人。字段映射位于 `OPENPI_IMAGE_FIELDS`。
+`--model` 还可选择其他模型的交付协议：
 
-更完整的 `ws-control` 操作说明（含硬件自检、三种协议和排错）见
+| `--model` | 传输 | 动作语义 | 能否直接执行 |
+| --- | --- | --- | --- |
+| `json` | JSON 文本 | 6 关节 + 夹爪 | ✅ |
+| `fastwam` | msgpack | 6 关节 + 夹爪（`autogen_mixed_ur5`） | ✅ |
+| `lingbot` | msgpack-numpy | 6 关节 + 夹爪（`ur5` profile） | ✅ |
+| `openwam` | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
+| `pi05`（旧名 `openpi05`） | msgpack-numpy | 绝对末端位姿 + 夹爪 | ❌ 仅 `--dry-run` |
+| `flexpi` | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
+
+`fastwam` 把原始 JPEG 字节和关节状态直接作为 `infer` 帧发送（无握手，token
+追加在 URL 中）。`lingbot` 先消费连接元数据，再发
+`{"reset": true, "prompt": ...}`，并把 `(dim, chunk, per_frame)` 响应里的
+零上下文动作块丢掉。`openwam` 先完成 `ping` → `reset` 握手，`representation`
+不是 `joint` 时直接拒绝，图像用 base64 PNG。`pi05` 和 `flexpi` 消费 OpenPI
+元数据帧、图像为 HWC uint8；它们的检查点面向其他机械臂，输出末端位姿，
+所以不加 `--dry-run` 会在连接机器人之前报错。
+
+无论哪个模型，返回动作不是 7 维时都会打印
+`WARNING: ... expected 7-dim single-arm UR5 actions, got D`；真机执行前直接
+停止，`--dry-run` 下只告警并继续预览。
+
+字段映射位于 `run_ws_control.py` 的 `IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS`、
+`PI05_IMAGE_FIELDS`、`LINGBOT_IMAGE_FIELDS`、`FLEXPI_IMAGE_FIELDS`、
+`OPENWAM_IMAGE_FIELDS`。
+
+更完整的 `ws-control` 操作说明（含硬件自检、各协议报文和排错）见
 [README_ws-ctl-robot.md](README_ws-ctl-robot.md)。
 
-三种协议的选择方式：
+协议的选择方式：
 
 ```yaml
 vla:
-  model: "json"      # json（默认）、fastwam、openpi05
+  model: "json"      # json（默认）、fastwam、lingbot、openwam、pi05、flexpi
 ```
 
-也可以在命令行用 `--model` 覆盖 YAML。
+也可以在命令行用 `--model` 覆盖 YAML；换模型先用 `--dry-run` 确认动作数值。
 
 ## 项目结构
 
