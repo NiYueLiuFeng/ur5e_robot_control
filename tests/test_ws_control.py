@@ -149,7 +149,7 @@ class FastWAMProtocolTest(unittest.TestCase):
         self.assertEqual(frame["id"], "req-3")
         self.assertEqual(frame["state"], [0, 1, 2, 3, 4, 5, 6])
         self.assertEqual(
-            [image["key"] for image in frame["images"]], ["front", "wrist"]
+            [image["key"] for image in frame["images"]], ["third_person", "wrist"]
         )
         self.assertTrue(frame["images"][0]["data"].startswith(b"\xff\xd8"))
 
@@ -197,11 +197,18 @@ class FastWAMProtocolTest(unittest.TestCase):
         self.assertEqual(len(connection.sent), 1)
         self.assertEqual(_unpack(connection.sent[0])["type"], "infer")
 
-    def test_run_parses_actions_without_commanding_robot(self):
+    def test_run_executes_returned_action_chunk(self):
         from apps.run_ws_control import _pack, _run
 
         connection = FakeConnection(
-            [_pack({"type": "actions", "actions": [[0.1] * 5]})]
+            [
+                _pack(
+                    {
+                        "type": "actions",
+                        "actions": [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]],
+                    }
+                )
+            ]
         )
         env = FakeEnv(
             {
@@ -215,13 +222,42 @@ class FastWAMProtocolTest(unittest.TestCase):
             env,
             connection,
             model="fastwam",
-            vla=make_vla(execute_horizon=1),
+            vla=make_vla(),
             task="plug",
-            max_steps=1,
+            max_steps=2,
             control_hz=1000.0,
         )
 
-        self.assertEqual(executed, 1)
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(env.commands), 2)
+        # 夹爪按 threshold=0.7 二值化为 1000 / 0。
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
+
+    def test_run_rejects_action_without_gripper_dimension(self):
+        from apps.run_ws_control import _pack, _run
+
+        connection = FakeConnection(
+            [_pack({"type": "actions", "actions": [[0.1] * 5]})]
+        )
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "7-value action"):
+            _run(
+                env,
+                connection,
+                model="fastwam",
+                vla=make_vla(execute_horizon=1),
+                task="plug",
+                max_steps=1,
+                control_hz=1000.0,
+            )
         self.assertEqual(env.commands, [])
 
 

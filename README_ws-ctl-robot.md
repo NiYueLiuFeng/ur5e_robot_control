@@ -76,7 +76,7 @@ task:
 
 ```python
 IMAGE_FIELDS = {"third_person": "third_left_top_rgb", "wrist": "wrist_rgb"}
-FASTWAM_IMAGE_FIELDS = {"front": "third_left_top_rgb", "wrist": "wrist_rgb"}
+FASTWAM_IMAGE_FIELDS = {"third_person": "third_left_top_rgb", "wrist": "wrist_rgb"}
 ```
 
 `state` 固定取 `obs["joint_positions"]`。换模型要改字段时，改这几行即可。
@@ -259,7 +259,7 @@ def _parse_actions(response, *, model):
 | 建连 | 直接请求 | 直接发 `infer`，不做握手 |
 | 图片 | base64 JPEG | 原始 JPEG 字节 |
 | state | `obs["joint_positions"]` | `obs["joint_positions"]` |
-| 动作 | 二值化夹爪后下发 | **只解析并打印，不下发** |
+| 动作 | 二值化夹爪后下发 | 二值化夹爪后下发（与 `json` 相同） |
 
 启动：
 
@@ -268,6 +268,14 @@ uv run ws-control \
   --config configs/hardware/ur5e_d455.yaml \
   --model fastwam \
   --server-url ws://127.0.0.1:8765/v1/ws \
+  --api-key fastwam-dev-token \
+  --max-steps 5
+
+
+python -m src.apps.run_ws_control \
+  --config configs/hardware/ur5e_d455.yaml \
+  --model fastwam \
+  --server-url ws://localhost:8765/v1/ws \
   --api-key fastwam-dev-token \
   --max-steps 5
 ```
@@ -282,12 +290,11 @@ uv run ws-control \
 | `state` | `obs["joint_positions"]` 平铺后的列表 |
 | `options.num_inference_steps` | `run_ws_control.py` 的 `NUM_INFERENCE_STEPS`（默认 10） |
 
-字段都固定在 `run_ws_control.py` 顶部常量里；`action` 只校验是二维有限值
-数组，维度以服务端返回为准，不写死。
-
-> 当前 `fastwam` 是“只解析、不执行”模式：收到 action 后打印
-> `FastWAM actions: shape=(N, D) first=[...]`，不会调用 `env.step()`。
-> 若要真正驱动 UR5e，需要先确定 action 到关节角的映射（例如 IK）。
+字段都固定在 `run_ws_control.py` 顶部常量里。`action` 先校验为二维有限值
+数组；下发前再要求每条形如 `[6 个关节角, 夹爪]`（7 维），否则报错停止。
+每一块动作执行 `vla.execute_horizon` 条，夹爪用 `vla.threshold` 二值化成
+0/1000，与控制 `json` 协议完全一致。收到 action 后会打印
+`FastWAM actions: shape=(N, D) first=[...]` 便于核对。
 
 ### 7.1 OpenPI 0.5（`--model openpi05`）
 

@@ -26,9 +26,14 @@ def connect_websocket(server_url: str, api_key: str | None, timeout_s: float) ->
         kwargs["additional_headers"] = headers
 
     try:
-        return websockets.sync.client.connect(server_url, proxy=None, **kwargs)
+        # `legacy=True` returns the connection directly instead of requiring
+        # `with connect(...)`, which is what the long-lived control loop needs.
+        return websockets.sync.client.connect(
+            server_url, proxy=None, legacy=True, **kwargs
+        )
     except TypeError:
+        # Older websockets: no `proxy` / `legacy` / `open_timeout` kwargs.
+        kwargs.pop("open_timeout", None)
         if "additional_headers" in kwargs:
             kwargs["extra_headers"] = kwargs.pop("additional_headers")
-        kwargs.pop("open_timeout", None)
         return websockets.sync.client.connect(server_url, **kwargs)

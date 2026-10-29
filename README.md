@@ -431,9 +431,9 @@ binarized with `vla.threshold` and sent as 0 or 1000.
 Use `--model fastwam` (or `vla.model: fastwam`) to speak FastWAM's
 msgpack/WebSocket protocol. That path sends raw JPEG bytes and a joint-state
 vector directly as an `infer` frame (no handshake; the token is appended to the
-URL), then parses and logs the action chunk without commanding the robot.
-Request fields are fixed in `run_ws_control.py`
-(`IMAGE_FIELDS`, `FASTWAM_IMAGE_FIELDS`).
+URL), then executes the action chunk on the robot exactly like the `json` path
+(gripper binarized with `vla.threshold`). Request fields are fixed in
+`run_ws_control.py` (`IMAGE_FIELDS`, `FASTWAM_IMAGE_FIELDS`).
 
 Use `--model openpi05` for OpenPI 0.5's msgpack-numpy protocol. The body carries
 CHW uint8 image arrays, a 7-value float32 single-arm state and a `prompt`;

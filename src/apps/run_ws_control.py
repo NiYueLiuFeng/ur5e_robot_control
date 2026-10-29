@@ -4,13 +4,12 @@ Three protocols are supported, selected with ``--model``:
 
 - ``json`` (default): JSON text frames with base64 JPEG images.
 - ``fastwam``: FastWAM msgpack frames with raw JPEG bytes and no handshake
-  (token goes in the URL). Actions are parsed and logged but NOT sent to the
-  robot.
+  (token goes in the URL). Actions are executed on the robot.
 - ``openpi05``: OpenPI 0.5 msgpack-numpy frames with CHW image arrays. Actions
   are parsed and logged but NOT sent to the robot.
 
 Each loop: read cameras + state -> send one request -> receive one action
-chunk -> execute (json) or log (fastwam/openpi05) the actions.
+chunk -> execute (json/fastwam) or log (openpi05) the actions.
 """
 
 from __future__ import annotations
@@ -38,7 +37,10 @@ NUM_INFERENCE_STEPS = 10
 # json 协议：服务端图片键名 -> RobotEnv.get_obs() 键名。
 IMAGE_FIELDS = {"third_person": "third_left_top_rgb", "wrist": "wrist_rgb"}
 # fastwam 协议：服务端相机键名 -> RobotEnv.get_obs() 键名。
-FASTWAM_IMAGE_FIELDS = {"front": "third_left_top_rgb", "wrist": "wrist_rgb"}
+FASTWAM_IMAGE_FIELDS = {
+    "third_person": "third_left_top_rgb",
+    "wrist": "wrist_rgb",
+}
 # openpi05 协议：服务端相机键名 -> RobotEnv.get_obs() 键名。
 # 单腕机器人没有左右两路腕部相机，两个键共用同一路 wrist。
 OPENPI_IMAGE_FIELDS = {
@@ -166,8 +168,8 @@ def _run(
                 f"first={np.round(actions[0], 4).tolist()}"
             )
         for action in actions:
-            if model != "json":
-                # 非 json 协议仅解析，不向机器人下发动作；按控制周期维持节奏。
+            if model == "openpi05":
+                # OpenPI 仅解析，不向机器人下发动作；按控制周期维持节奏。
                 time.sleep(1.0 / control_hz)
             else:
                 # RobotEnv.step 会做安全限位，并按 control_hz 控制下发节奏。
@@ -382,6 +384,11 @@ def _robot_command(action: np.ndarray, threshold: float | None) -> np.ndarray:
     """Convert a policy action into a UR5e joint command (gripper 0 or 1000)."""
 
     command = np.asarray(action, dtype=float).copy()
+    if command.shape != (ACTION_DIM,):
+        # fastwam 的 action 维度以服务端为准，下发前必须确认是 6 关节 + 夹爪。
+        raise ValueError(
+            f"expected a {ACTION_DIM}-value action, got shape {command.shape}"
+        )
     # 服务端第 7 维可能是 0~1 概率或 0~1000 原始值，统一二值化成 0/1000。
     limit = 0.5 if threshold is None else float(threshold)
     command[6] = 1000.0 if command[6] >= limit else 0.0

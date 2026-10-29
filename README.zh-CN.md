@@ -417,8 +417,9 @@ PYTHONPATH=src python -m apps.run_ws_control \
 
 使用 `--model fastwam`（或 `vla.model: fastwam`）可对接 FastWAM 的
 msgpack/WebSocket 协议。该路径把原始 JPEG 字节和关节状态向量直接作为 `infer`
-帧发送（无握手，token 追加在 URL 中），然后解析并打印动作块，但**不**下发到机器人。
-请求字段固定在 `run_ws_control.py` 的 `IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS` 中。
+帧发送（无握手，token 追加在 URL 中），然后像 `json` 路径一样把动作块下发到机器人
+（夹爪用 `vla.threshold` 二值化）。请求字段固定在 `run_ws_control.py` 的
+`IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS` 中。
 
 使用 `--model openpi05` 可对接 OpenPI 0.5 的 msgpack-numpy 协议。请求体包含 CHW
 uint8 图像数组、7 维 float32 单臂状态和 `prompt`；返回动作同样只解析打印，**不**下发
