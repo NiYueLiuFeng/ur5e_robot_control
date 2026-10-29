@@ -418,7 +418,8 @@ PYTHONPATH=src python -m apps.run_ws_control \
 
 每条动作在下发前都会校验：必须是 7 维（单臂 UR5 = 6 关节 + 夹爪）有限值，
 6 个关节值在 ±2π rad 内，且单关节每次变化不超过 `vla.max_joint_delta`。
-模型动作按数据集帧率（15 Hz）节流，而不是 100 Hz 控制频率。
+模型动作按数据集帧率（15 Hz）节流，而不是 100 Hz 控制频率。循环运行中按
+**N** 或 **T**，机械臂会回到 `robot.reset_joints`，并按新位姿重新开始请求。
 
 `--model` 还可选择其他模型的交付协议：
 

@@ -432,7 +432,9 @@ binarized with `vla.threshold` and sent as 0 or 1000.
 Every action is validated before it reaches `servoJ`: it must be 7 finite
 values, the six joints must lie within ±2π rad, and each joint may move at most
 `vla.max_joint_delta` per command. Model actions are paced at the dataset rate
-(15 Hz for the model protocols) instead of the 100 Hz control loop.
+(15 Hz for the model protocols) instead of the 100 Hz control loop. Pressing
+**N** or **T** while the loop runs returns the arm to `robot.reset_joints` and
+restarts the request cycle from the new pose.
 
 `--model` also selects one of the other delivery protocols:
 

@@ -214,7 +214,12 @@ uv run ws-control \
 4. 按 `robot.reset_joints` 分 100 步移动到初始位姿；
 5. 终端提示 `press ENTER to start policy control loop...`，按回车开始；
 6. 循环：取观测 → 请求 → 校验 → 执行 action；
-7. `Ctrl+C` 退出，或达到 `--max-steps` 自动停止。
+7. 运行中按 **N** 或 **T**，机械臂回到 `robot.reset_joints`（复位），并丢弃
+   当前动作块剩余动作、按新位姿重新请求；
+8. `Ctrl+C` 退出，或达到 `--max-steps` 自动停止。
+
+复位键需要图形环境（`pynput`）；在无显示器的 SSH 会话里监听会失效，程序只
+打印 `Reset keys disabled: ...` 并继续运行。`--dry-run` 下不启动复位键。
 
 ### 命令行参数
 
@@ -455,6 +460,7 @@ Flex-π 的检查点面向 Flexiv 机械臂，13 维是末端状态而不是 UR5
 ## 9. 安全提示
 
 - 真机运行前确认急停按钮可用，手不要离开急停。
+- 运行中随时可按 **N / T** 让机械臂分小步回到 `robot.reset_joints`，不会跳变。
 - 首次运行务必 `--max-steps` 取小值（如 5），并观察 `reset_joints` 移动过程。
 - 换模型先用 `--dry-run` 看 `actions` 的数值范围，再上真机。
 - 默认按 `control_hz: 100` 逐条下发 `servoJ`；模型动作按其训练帧率

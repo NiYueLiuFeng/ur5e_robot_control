@@ -21,7 +21,8 @@ in preview mode (``--dry-run``); the delivered UR5 checkpoints are FastWAM
 ``autogen_mixed_ur5``, LingBot-VA ``ur5`` and OpenWAM ``ur5``.
 
 Each loop: read cameras + state -> send one request -> receive one action
-chunk -> validate and execute (or preview) the actions.
+chunk -> validate and execute (or preview) the actions. While the loop runs,
+pressing N or T moves the arm back to ``robot.reset_joints``.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ import argparse
 import base64
 import json
 import math
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -105,6 +107,46 @@ MODEL_SPECS = {
     "pi05": ModelSpec("eef", 15.0, "绝对末端位姿 + 夹爪"),
     "flexpi": ModelSpec("eef", 15.0, "13 维 HS13 绝对末端状态"),
 }
+# 按这些键时让机械臂回到 robot.reset_joints（复位）。
+RESET_KEYS = ("n", "t")
+
+
+class ResetKeyListener:
+    """Set a one-shot flag when N or T is pressed, mirroring the teleop listeners."""
+
+    def __init__(self) -> None:
+        self._requested = threading.Event()
+        self._listener = None
+
+    def start(self) -> None:
+        try:
+            from pynput import keyboard
+        except Exception as exc:  # pynput needs a display on Linux
+            print(f"Reset keys disabled: {exc}")
+            return
+
+        def on_press(key: Any) -> None:
+            char = getattr(key, "char", None)
+            if char is not None and char.lower() in RESET_KEYS:
+                self._requested.set()
+
+        try:
+            self._listener = keyboard.Listener(on_press=on_press)
+            self._listener.start()
+        except Exception as exc:
+            print(f"Reset keys disabled: {exc}")
+
+    def take(self) -> bool:
+        """Return True once per reset request."""
+        if not self._requested.is_set():
+            return False
+        self._requested.clear()
+        return True
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            self._listener.stop()
+            self._listener = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -199,7 +241,10 @@ def main(argv: list[str] | None = None) -> None:
             if not args.no_wait:
                 # 停顿一下，留给操作员确认现场并把手放到急停上。
                 input("press ENTER to start policy control loop...")
-        print(f"Starting UR5e policy control ({model}). Press Ctrl+C to stop.")
+        print(
+            f"Starting UR5e policy control ({model}). "
+            "Press Ctrl+C to stop; press N or T to return to the start pose."
+        )
         steps = _run(
             bundle.env,
             connection,
@@ -210,6 +255,7 @@ def main(argv: list[str] | None = None) -> None:
             control_hz=config.robot.control_hz,
             action_hz=action_hz,
             max_joint_delta=max_joint_delta,
+            reset_joints=config.robot.reset_joints,
             dry_run=dry_run,
         )
         print(f"Stopped after handling {steps} action(s).")
@@ -232,6 +278,7 @@ def _run(
     control_hz: float,
     action_hz: float | None = None,
     max_joint_delta: float | None = None,
+    reset_joints: Any = None,
     dry_run: bool = False,
 ) -> int:
     """Run the request loop and return how many actions were handled."""
@@ -247,70 +294,83 @@ def _run(
 
     executed = 0
     request_id = 0
-    while max_steps is None or executed < max_steps:
-        # 每轮重新取一次观测，交给 get_model_body 组装请求。
-        obs = env.get_obs()
-        # 限幅参考：本轮开始时的实际关节角，逐条下发后更新为刚下发的目标。
-        reference = np.asarray(obs["joint_positions"], dtype=float).reshape(-1)[:6]
-        body = get_model_body(
-            obs,
-            model=model,
-            repo_id=vla.repo_id,
-            task=task,
-            request_id=request_id,
-        )
-        # 一问一答：观测发给服务端，拿回一个动作块。
-        response = _request(connection, body, model=model)
-        actions = _parse_actions(response, model=model)
-        # 单臂 UR5 的动作必须是 7 维；dry-run 只告警，真机执行前直接报错。
-        _check_action_shape(actions, model=model, warn_only=dry_run)
-        shape_ok = actions.shape[1] == ACTION_DIM
-        # 只处理前 execute_horizon 条，剩余动作丢弃，下一轮重新请求。
-        actions = actions[: vla.execute_horizon]
-        if model != "json" and len(actions):
-            print(
-                f"{model} actions: shape={actions.shape} "
-                f"first={np.round(actions[0], 4).tolist()}"
+    # 按 N/T 回到 robot.reset_joints；dry-run 不动机器人，不需要监听。
+    reset_key = ResetKeyListener()
+    if reset_joints is not None and not dry_run:
+        reset_key.start()
+    try:
+        while max_steps is None or executed < max_steps:
+            if reset_key.take():
+                _reset_to_start(env, reset_joints)
+            # 每轮重新取一次观测，交给 get_model_body 组装请求。
+            obs = env.get_obs()
+            # 限幅参考：本轮开始时的实际关节角，逐条下发后更新为刚下发的目标。
+            reference = np.asarray(obs["joint_positions"], dtype=float).reshape(-1)[:6]
+            body = get_model_body(
+                obs,
+                model=model,
+                repo_id=vla.repo_id,
+                task=task,
+                request_id=request_id,
             )
-        for action in actions:
-            started = time.monotonic()
-            if dry_run:
-                # 预览模式：不碰机器人，只按同样的节奏维持循环。
-                if spec.executable and shape_ok:
+            # 一问一答：观测发给服务端，拿回一个动作块。
+            response = _request(connection, body, model=model)
+            actions = _parse_actions(response, model=model)
+            # 单臂 UR5 的动作必须是 7 维；dry-run 只告警，真机执行前直接报错。
+            _check_action_shape(actions, model=model, warn_only=dry_run)
+            shape_ok = actions.shape[1] == ACTION_DIM
+            # 只处理前 execute_horizon 条，剩余动作丢弃，下一轮重新请求。
+            actions = actions[: vla.execute_horizon]
+            if model != "json" and len(actions):
+                print(
+                    f"{model} actions: shape={actions.shape} "
+                    f"first={np.round(actions[0], 4).tolist()}"
+                )
+            for action in actions:
+                if reset_key.take():
+                    # 复位后丢弃剩下的动作，下一轮按新位姿重新请求。
+                    _reset_to_start(env, reset_joints)
+                    break
+                started = time.monotonic()
+                if dry_run:
+                    # 预览模式：不碰机器人，只按同样的节奏维持循环。
+                    if spec.executable and shape_ok:
+                        command = _robot_command(
+                            action,
+                            vla.threshold,
+                            reference=reference,
+                            max_joint_delta=max_joint_delta,
+                        )
+                        reference = command[:6].copy()
+                        preview = f"command={np.round(command, 4).tolist()}"
+                    else:
+                        preview = (
+                            "action="
+                            f"{np.round(np.asarray(action, dtype=float).reshape(-1), 4).tolist()}"
+                        )
+                    print(f"  dry-run {executed}: {preview}")
+                    time.sleep(period or 1.0 / control_hz)
+                else:
                     command = _robot_command(
                         action,
                         vla.threshold,
                         reference=reference,
                         max_joint_delta=max_joint_delta,
                     )
+                    # RobotEnv.step 会做安全限位，并按 control_hz 控制下发节奏。
+                    env.step(command)
+                    if period:
+                        # 模型动作按数据集帧率给出，不能按 control_hz 抢跑。
+                        remaining = period - (time.monotonic() - started)
+                        if remaining > 0:
+                            time.sleep(remaining)
                     reference = command[:6].copy()
-                    preview = f"command={np.round(command, 4).tolist()}"
-                else:
-                    preview = (
-                        "action="
-                        f"{np.round(np.asarray(action, dtype=float).reshape(-1), 4).tolist()}"
-                    )
-                print(f"  dry-run {executed}: {preview}")
-                time.sleep(period or 1.0 / control_hz)
-            else:
-                command = _robot_command(
-                    action,
-                    vla.threshold,
-                    reference=reference,
-                    max_joint_delta=max_joint_delta,
-                )
-                # RobotEnv.step 会做安全限位，并按 control_hz 控制下发节奏。
-                env.step(command)
-                if period:
-                    # 模型动作按数据集帧率给出，不能按 control_hz 抢跑。
-                    remaining = period - (time.monotonic() - started)
-                    if remaining > 0:
-                        time.sleep(remaining)
-                reference = command[:6].copy()
-            executed += 1
-            if max_steps is not None and executed >= max_steps:
-                break
-        request_id += 1
+                executed += 1
+                if max_steps is not None and executed >= max_steps:
+                    break
+            request_id += 1
+    finally:
+        reset_key.stop()
     return executed
 
 
@@ -793,6 +853,13 @@ def _robot_command(
     limit = 0.5 if threshold is None else float(threshold)
     command[6] = 1000.0 if command[6] >= limit else 0.0
     return command
+
+
+def _reset_to_start(env: Any, reset_joints: Any) -> None:
+    """Move the arm back to `robot.reset_joints` (N/T key)."""
+
+    print("Reset key pressed: returning to the start pose.")
+    _move_to_start(env, reset_joints)
 
 
 def _move_to_start(env: Any, joints: Any, steps: int = 100) -> None:

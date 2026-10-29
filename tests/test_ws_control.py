@@ -1,6 +1,7 @@
 import base64
 import json
 import unittest
+import unittest.mock
 from types import SimpleNamespace
 
 import numpy as np
@@ -635,6 +636,100 @@ class RobotCommandTest(unittest.TestCase):
         pose = np.array([0.5, -0.2, 0.3, 3.1, -0.2, 0.1, 0.0])
         with self.assertRaisesRegex(ValueError, "joint command"):
             _robot_command(pose * 3.0, 0.7)
+
+
+class ResetKeyTest(unittest.TestCase):
+    def test_take_is_one_shot(self):
+        from apps.run_ws_control import ResetKeyListener
+
+        listener = ResetKeyListener()
+        self.assertFalse(listener.take())
+        listener._requested.set()
+        self.assertTrue(listener.take())
+        self.assertFalse(listener.take())
+        listener.stop()  # no listener thread was started in this test
+
+    def test_reset_keys_cover_uppercase_input(self):
+        from apps.run_ws_control import RESET_KEYS
+
+        # pynput reports 'N'/'T' when shift is held; the handler lowercases.
+        self.assertEqual(
+            [char.lower() in RESET_KEYS for char in ("N", "T", "n", "t")],
+            [True, True, True, True],
+        )
+
+    @unittest.mock.patch("apps.run_ws_control.ResetKeyListener")
+    def test_reset_request_returns_to_start_pose(self, listener_cls):
+        from apps.run_ws_control import _run
+
+        class FakeKeys:
+            def __init__(self):
+                self.calls = 0
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def take(self):
+                # 第一轮循环开始时就请求一次复位。
+                self.calls += 1
+                return self.calls == 1
+
+        listener_cls.side_effect = lambda: FakeKeys()
+        connection = FakeConnection([json.dumps({"action": [[0.1] * 6 + [0.0]]})])
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        executed = _run(
+            env,
+            connection,
+            model="json",
+            vla=make_vla(execute_horizon=1),
+            task="pick",
+            max_steps=1,
+            control_hz=1000.0,
+            reset_joints=np.full(7, 0.5),
+        )
+
+        self.assertEqual(executed, 1)
+        # 100 步复位插值 + 1 条策略动作。
+        self.assertEqual(len(env.commands), 101)
+        np.testing.assert_allclose(env.commands[0][:6], np.zeros(6))
+        np.testing.assert_allclose(env.commands[99][:6], np.full(6, 0.5))
+        np.testing.assert_allclose(env.commands[-1][:6], np.full(6, 0.1))
+
+    def test_reset_is_skipped_without_reset_joints(self):
+        from apps.run_ws_control import _run
+
+        connection = FakeConnection([json.dumps({"action": [[0.1] * 6 + [0.0]]})])
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        # 没有 reset_joints 时不启动监听（测试环境里也没有 pynput 显示器）。
+        executed = _run(
+            env,
+            connection,
+            model="json",
+            vla=make_vla(execute_horizon=1),
+            task="pick",
+            max_steps=1,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 1)
+        self.assertEqual(len(env.commands), 1)
 
 
 if __name__ == "__main__":
