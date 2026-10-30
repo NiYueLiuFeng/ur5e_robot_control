@@ -4,6 +4,7 @@ import unittest
 import unittest.mock
 from types import SimpleNamespace
 
+import msgpack
 import numpy as np
 
 try:
@@ -306,12 +307,15 @@ class OpenPI05ProtocolTest(unittest.TestCase):
             set(body),
             {
                 "observation.state",
-                "observation.images.front",
+                "observation.images.third_person",
                 "observation.images.wrist",
                 "prompt",
             },
         )
-        for name in ("observation.images.front", "observation.images.wrist"):
+        for name in (
+            "observation.images.third_person",
+            "observation.images.wrist",
+        ):
             self.assertEqual(body[name].shape, (8, 6, 3))
             self.assertEqual(body[name].dtype, np.uint8)
         self.assertEqual(body["observation.state"].shape, (7,))
@@ -356,31 +360,44 @@ class OpenPI05ProtocolTest(unittest.TestCase):
         self.assertEqual(connection.sent, [])
         self.assertEqual(connection.responses, [])
 
-    @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
-    def test_request_round_trips_numpy_body(self):
+    def test_request_round_trips_ndarray_body(self):
         from apps.run_ws_control import _request
 
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
         body = {
-            "images": {"cam_high": np.zeros((3, 4, 4), dtype=np.uint8)},
-            "state": np.arange(7, dtype=np.float32),
+            "observation.images.third_person": np.zeros((3, 4, 4), dtype=np.uint8),
+            "observation.state": np.arange(7, dtype=np.float32),
             "prompt": "pick",
         }
         connection = FakeConnection(
             [
-                msgpack_numpy.packb(
+                msgpack.packb(
                     {
-                        "actions": np.zeros((2, 7), dtype=np.float32),
-                        "state": np.arange(7, dtype=np.float32),
+                        "actions": server_array(np.zeros((2, 7), dtype=np.float32)),
                         "server_timing": {"infer_ms": 1.0},
-                    }
+                    },
+                    use_bin_type=True,
                 )
             ]
         )
 
         response = _request(connection, body, model="pi05")
 
-        sent = msgpack_numpy.unpackb(connection.sent[0])
-        np.testing.assert_array_equal(sent["state"], body["state"])
+        sent = msgpack.unpackb(connection.sent[0], raw=False, strict_map_key=False)
+        state = sent["observation.state"]
+        self.assertTrue(state[b"__ndarray__"])
+        self.assertEqual(state[b"shape"], [7])
+        np.testing.assert_array_equal(
+            np.frombuffer(state[b"data"], dtype=np.float32), body["observation.state"]
+        )
         self.assertEqual(response["actions"].shape, (2, 7))
 
     @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
@@ -504,6 +521,79 @@ class LingBotProtocolTest(unittest.TestCase):
             {"reset": True, "prompt": "plug"},
         )
 
+    def test_lingbot_request_round_trips_ndarray_body(self):
+        from apps.run_ws_control import _request
+
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
+        body = {
+            "obs": {
+                "observation.images.third_person": np.zeros(
+                    (3, 4, 4), dtype=np.uint8
+                ),
+                "observation.images.wrist": np.zeros((3, 4, 4), dtype=np.uint8),
+            },
+            "prompt": "pick",
+        }
+        raw = np.zeros((7, 2, 2), dtype=np.float32)
+        raw[:6, 1, 0] = 0.1
+        connection = FakeConnection(
+            [
+                msgpack.packb(
+                    {
+                        "action": server_array(raw),
+                        "server_timing": {"infer_ms": 1.0},
+                    },
+                    use_bin_type=True,
+                )
+            ]
+        )
+
+        response = _request(connection, body, model="lingbot")
+
+        sent = msgpack.unpackb(connection.sent[0], raw=False, strict_map_key=False)
+        image = sent["obs"]["observation.images.third_person"]
+        self.assertTrue(image[b"__ndarray__"])
+        self.assertEqual(image[b"shape"], [3, 4, 4])
+        self.assertEqual(image[b"dtype"], np.uint8(0).dtype.str)
+        self.assertEqual(response["action"].shape, (7, 2, 2))
+
+    def test_prepare_server_accepts_reset_server_timing(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [
+                msgpack_numpy.packb({"frame_chunk_size": 2}),
+                msgpack_numpy.packb({"server_timing": {"infer_ms": 1111.98}}),
+            ]
+        )
+
+        # 该服务端 reset 会带回 infer_ms，不应被当成协议错误。
+        _prepare_server(connection, model="lingbot", task="plug")
+
+        self.assertEqual(len(connection.sent), 1)
+        self.assertEqual(connection.responses, [])
+
+    def test_prepare_server_rejects_unexpected_reset_payload(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [
+                msgpack_numpy.packb({"frame_chunk_size": 2}),
+                msgpack_numpy.packb({"action": np.zeros((7, 2, 2))}),
+            ]
+        )
+
+        with self.assertRaises(RuntimeError):
+            _prepare_server(connection, model="lingbot", task="plug")
+
     def test_parse_drops_the_conditioning_frame(self):
         from apps.run_ws_control import _parse_actions
 
@@ -524,7 +614,15 @@ class LingBotProtocolTest(unittest.TestCase):
         raw[:6, 1, 0] = 0.1
         raw[6, 1, 0] = 0.9
         raw[6, 1, 1] = 0.1
-        connection = FakeConnection([msgpack_numpy.packb({"action": raw})])
+        reset_ack = msgpack_numpy.packb({"server_timing": {"infer_ms": 1.0}})
+        connection = FakeConnection(
+            [
+                reset_ack,
+                msgpack_numpy.packb({"action": raw}),
+                reset_ack,
+                msgpack_numpy.packb({"action": raw}),
+            ]
+        )
         env = FakeEnv(dict(self.obs))
 
         executed = _run(
@@ -533,14 +631,26 @@ class LingBotProtocolTest(unittest.TestCase):
             model="lingbot",
             vla=make_vla(execute_horizon=2),
             task="plug",
-            max_steps=2,
+            max_steps=4,
             control_hz=1000.0,
         )
 
-        self.assertEqual(executed, 2)
-        self.assertEqual(len(env.commands), 2)
+        self.assertEqual(executed, 4)
+        self.assertEqual(len(env.commands), 4)
         self.assertEqual(env.commands[0][-1], 1000.0)
         self.assertEqual(env.commands[1][-1], 0.0)
+        # 每块观测请求前都要先 reset，清空服务端 streaming VAE 的缓存。
+        self.assertEqual(len(connection.sent), 4)
+        from apps.run_ws_control import _unpack_ndarray
+
+        self.assertEqual(
+            _unpack_ndarray(connection.sent[0]),
+            {"reset": True, "prompt": "plug"},
+        )
+        self.assertEqual(
+            _unpack_ndarray(connection.sent[2]),
+            {"reset": True, "prompt": "plug"},
+        )
 
 
 class OpenWAMProtocolTest(unittest.TestCase):

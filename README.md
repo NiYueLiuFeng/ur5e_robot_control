@@ -449,18 +449,21 @@ are deleted on exit, and `--dry-run` never records.
 | --- | --- | --- | --- |
 | `json` | JSON text | 6 joints + gripper | yes |
 | `fastwam` | msgpack | 6 joints + gripper (`autogen_mixed_ur5`) | yes |
-| `lingbot` | msgpack-numpy | 6 joints + gripper (`ur5` profile) | yes |
+| `lingbot` | msgpack (`__ndarray__`) | 6 joints + gripper (`ur5` profile) | yes |
 | `openwam` | JSON text | 6 joints + gripper (`ur5` dataset) | yes |
-| `pi05` (`openpi05`) | msgpack-numpy | absolute joints + gripper (`pi05_huashu`) | yes |
+| `pi05` (`openpi05`) | msgpack (`__ndarray__`) | absolute joints + gripper (`pi05_huashu`) | yes |
 | `flexpi` | msgpack-numpy | 13-dim HS13 EEF state | no, `--dry-run` only |
 
 `fastwam` sends raw JPEG bytes and a joint-state vector directly as an `infer`
 frame (no handshake; the token is appended to the URL). `lingbot` consumes the
-connect metadata, sends a `{"reset": true, "prompt": ...}` frame, and drops the
-zero-context action block from each `(dim, chunk, per_frame)` response.
-`openwam` completes a `ping` → `reset` handshake, refuses non-`joint`
-representations, and sends base64 PNG images. `pi05` and `flexpi` consume the
-OpenPI metadata frame and use HWC uint8 images. `pi05_huashu` returns `(N, 7)`
+connect metadata, sends a `{"reset": true, "prompt": ...}` frame (the ack may
+carry only `server_timing`), resets again before every observation request
+because the server's streaming VAE caches frames until reset, and drops the
+zero-context action block from each `(dim, chunk, per_frame)` response. `openwam` completes a `ping` → `reset`
+handshake, refuses non-`joint` representations, and sends base64 PNG images.
+`lingbot` and `pi05` both send HWC uint8 images with the server's own
+`__ndarray__` msgpack encoding (plain msgpack, not msgpack-numpy); `flexpi`
+uses msgpack-numpy. `pi05_huashu` returns `(N, 7)`
 absolute joint actions, so it drives the arm directly (the server already
 undoes normalization and delta->ABS; the client must not add the state back).
 The multi-arm `guodi` / `xinsong` configs (20 / 16 dims) are stopped by the

@@ -433,17 +433,20 @@ PYTHONPATH=src python -m apps.run_ws_control \
 | --- | --- | --- | --- |
 | `json` | JSON 文本 | 6 关节 + 夹爪 | ✅ |
 | `fastwam` | msgpack | 6 关节 + 夹爪（`autogen_mixed_ur5`） | ✅ |
-| `lingbot` | msgpack-numpy | 6 关节 + 夹爪（`ur5` profile） | ✅ |
+| `lingbot` | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
-| `pi05`（旧名 `openpi05`） | msgpack-numpy | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
+| `pi05`（旧名 `openpi05`） | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
 
 `fastwam` 把原始 JPEG 字节和关节状态直接作为 `infer` 帧发送（无握手，token
 追加在 URL 中）。`lingbot` 先消费连接元数据，再发
-`{"reset": true, "prompt": ...}`，并把 `(dim, chunk, per_frame)` 响应里的
-零上下文动作块丢掉。`openwam` 先完成 `ping` → `reset` 握手，`representation`
-不是 `joint` 时直接拒绝，图像用 base64 PNG。`pi05` 和 `flexpi` 消费 OpenPI
-元数据帧、图像为 HWC uint8；`pi05_huashu` 返回的是 `(N, 7)` 绝对关节角，
+`{"reset": true, "prompt": ...}`（回包可能只带 `server_timing`），并且每次
+观测请求前都再 reset 一次（服务端 streaming VAE 的帧缓存只在 reset 时清空），
+再把 `(dim, chunk, per_frame)` 响应里的零上下文动作块丢掉。`openwam` 先完成
+`ping` → `reset` 握手，`representation` 不是 `joint` 时直接拒绝，图像用
+base64 PNG。`lingbot` 和 `pi05` 的图像都是 HWC uint8，并用服务端自己的
+`__ndarray__` 编码（纯 msgpack，不是 msgpack-numpy）；`flexpi` 使用
+msgpack-numpy。`pi05_huashu` 返回 `(N, 7)` 绝对关节角，
 可直接执行（服务端已完成反归一化和 Delta→ABS，客户端不要再加 state），
 而 `guodi`（20 维）/ `xinsong`（16 维）多臂检查点会被 7 维校验拦下，
 `flexiv` 的 7 维是 7 关节 Flexiv 臂、不能用于 UR5e。`flexpi` 的检查点面向

@@ -19,9 +19,9 @@
 | --- | --- | --- | --- | --- |
 | `json` | 通用 mock / 自建服务 | JSON 文本 | 6 关节 + 夹爪 | ✅ |
 | `fastwam` | FastWAM | msgpack | 6 关节 + 夹爪（`autogen_mixed_ur5`） | ✅ |
-| `lingbot` | LingBot-VA | msgpack-numpy | 6 关节 + 夹爪（`ur5` profile） | ✅ |
+| `lingbot` | LingBot-VA | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | OpenWAM | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
-| `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack-numpy | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
+| `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | Flex-π | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
 
 UR5e 的 `servoJ` 只接受**绝对关节角**，所以 `flexpi` 这类输出末端位姿的
@@ -55,8 +55,9 @@ uv run check-recording-ready \
   --check-robot-tcp
 ```
 
-`lingbot` / `pi05` / `flexpi` 需要 `msgpack-numpy`（已在项目依赖里）；
-`openwam` 用 `cv2` 编码 PNG。
+`lingbot` / `pi05` 用服务端自己的 `__ndarray__` 编码（纯 msgpack，不是
+msgpack-numpy）；`flexpi` 需要 `msgpack-numpy`（已在项目依赖里）；`openwam`
+用 `cv2` 编码 PNG。
 
 ---
 
@@ -379,11 +380,22 @@ python -m src.apps.run_ws_control \
 
 ### 7.2 LingBot-VA（`--model lingbot`）
 
-msgpack-numpy 协议：
+纯 msgpack 协议，body 里的 numpy 数组用服务端自己的 `__ndarray__` 格式编码
+（`{b"__ndarray__": True, b"data": <原始字节>, b"dtype": "|u1", b"shape": [...]}`），
+不是 msgpack-numpy——该服务端用纯 msgpack 解包，msgpack-numpy 数组会变成普通
+dict，服务端 `torch.from_numpy` 会报 `numpy.object_` 类型错误：
 
-1. 建连后服务端先发一条 metadata（`frame_chunk_size` 等），客户端消费掉；
-2. 客户端发 `{"reset": true, "prompt": ...}`，服务端回 `{}`；
-3. 之后每轮发观测。
+1. 建连后服务端先发一条 metadata（`frame_chunk_size` 等；当前部署回 `{}`），客户端消费掉；
+2. 客户端发 `{"reset": true, "prompt": ...}`，服务端回 `{}`，或只带
+   `server_timing`（如 `{"server_timing": {"infer_ms": 76.9}}`），两种都接受；
+3. 之后每轮发观测，`obs` 里的图像同样用 `__ndarray__` 数组。
+
+每轮观测请求前都要再发一次 `reset`。服务端只在 `frame_st_id == 0` 时编码观测，
+而 streaming VAE 的 `feat_cache` 会跨调用保留；连续两次不发 reset 的观测请求，
+第二次会拿单帧输入去拼缓存，在 `time_conv` 报
+`Kernel size can't be greater than actual input size`。本入口每块都从当前观测
+重新推理、不用 `compute_kv_cache`，所以 reset 让每块都等价于独立的第一块
+（每块多约 0.1–0.2 s）。
 
 | 请求字段 | 来源 |
 | --- | --- |
@@ -423,12 +435,14 @@ JSON 文本协议，带探活和重置握手：
 
 ### 7.4 OpenPI 0.5（`--model pi05`）
 
-msgpack-numpy 协议，body 里直接是 numpy 数组（不是 JPEG）。建连后必须先
-消费服务端的 metadata 帧，之后每轮收发：
+msgpack 协议，body 里的 numpy 数组用服务端自己的 `__ndarray__` 格式编码
+（`{b"__ndarray__": True, b"data": <原始字节>, b"dtype": "<u1", b"shape": [...]}`），
+不是 msgpack-numpy——该服务端用纯 msgpack 解包，msgpack-numpy 数组会被当成
+普通 dict。建连后必须先消费服务端的 metadata 帧，之后每轮收发：
 
 | 请求字段 | 来源 |
 | --- | --- |
-| `observation.images.front` | `third_left_top_rgb`，HWC RGB uint8 |
+| `observation.images.third_person` | `third_left_top_rgb`，HWC RGB uint8 |
 | `observation.images.wrist` | `wrist_rgb`，HWC RGB uint8 |
 | `observation.state` | 7 维关节状态（6 关节 + 夹爪）float32 |
 | `prompt` | `task.file` 的 `task`，或 `--task` |

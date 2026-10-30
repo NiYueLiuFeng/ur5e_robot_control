@@ -5,11 +5,14 @@
 - ``json`` (default): JSON text frames with base64 JPEG images.
 - ``fastwam``: FastWAM msgpack frames with raw JPEG bytes and no handshake
   (token goes in the URL).
-- ``lingbot``: LingBot-VA msgpack-numpy frames. The server sends metadata on
-  connect, then accepts a ``reset`` frame and one-frame ``obs`` requests.
+- ``lingbot``: LingBot-VA msgpack frames using the server's ``__ndarray__``
+  array encoding. The server sends metadata on connect, then accepts a
+  ``reset`` frame and one-frame ``obs`` requests; the client resets before
+  every request because the server's streaming VAE caches frames until reset.
 - ``openwam``: OpenWAM JSON text frames with base64 PNG images. The server
   needs a ``ping`` / ``reset`` handshake before the first ``obs``.
-- ``pi05`` (alias ``openpi05``): OpenPI 0.5 msgpack-numpy frames.
+- ``pi05`` (alias ``openpi05``): OpenPI 0.5 msgpack frames using the server's
+  ``__ndarray__`` array encoding.
 - ``flexpi``: Flex-π msgpack-numpy frames with the 13-dim HS13 state.
 
 Execution contract: the UR5e accepts absolute 6-joint + gripper commands, so
@@ -63,6 +66,8 @@ ACTION_DIM = 7
 JOINT_LIMIT_RAD = 2.0 * math.pi
 # FastWAM 的去噪步数。
 NUM_INFERENCE_STEPS = 10
+# 每个动作块处理完后等待 20 ms，再发起下一次请求。
+CHUNK_WAIT_S = 0.02
 # json 协议：服务端图片键名 -> RobotEnv.get_obs() 键名。
 IMAGE_FIELDS = {"third_person": "third_left_top_rgb", "wrist": "wrist_rgb"}
 # fastwam 协议：服务端相机键名 -> RobotEnv.get_obs() 键名。
@@ -72,7 +77,7 @@ FASTWAM_IMAGE_FIELDS = {
 }
 # pi05 协议：OpenPI 字段名 -> RobotEnv.get_obs() 键名（HWC RGB uint8）。
 PI05_IMAGE_FIELDS = {
-    "observation.images.front": "third_left_top_rgb",
+    "observation.images.third_person": "third_left_top_rgb",
     "observation.images.wrist": "wrist_rgb",
 }
 # lingbot 协议：ur5 profile 的 obs_cam_keys（见 wan_va/ur5.py）。
@@ -343,6 +348,10 @@ def _run(
                 task=task,
                 request_id=request_id,
             )
+            if model == "lingbot":
+                # 服务端的 streaming VAE 缓存只在 reset 时清空，而每块都要重新
+                # 编码当前观测；不 reset 的话第二块会报卷积核大于输入。
+                _reset_lingbot(connection, task, verbose=False)
             # 一问一答：观测发给服务端，拿回一个动作块。
             response = _request(connection, body, model=model)
             actions = _parse_actions(response, model=model)
@@ -402,6 +411,8 @@ def _run(
                 if max_steps is not None and executed >= max_steps:
                     break
             request_id += 1
+            # 每个动作块处理完停 20 ms，再向服务端请求下一个 chunk。
+            time.sleep(CHUNK_WAIT_S)
     finally:
         reset_key.stop()
     return executed
@@ -538,8 +549,14 @@ def _request(connection: Any, body: dict[str, Any], *, model: str) -> dict[str, 
 
     model = _normalize_model(model)
 
-    if model in {"pi05", "lingbot", "flexpi"}:
-        # 这三种协议都直接序列化 numpy 数组，需要 msgpack-numpy 编解码。
+    if model in {"lingbot", "pi05"}:
+        # 这两类服务端都用纯 msgpack 收包，数组走它们自己的 `__ndarray__` 帧，
+        # 不是 msgpack-numpy；发 msgpack-numpy 数组时服务端会把它当成普通 dict。
+        connection.send(_pack_ndarray(body))
+        return _unpack_ndarray(connection.recv())
+
+    if model == "flexpi":
+        # Flex-π 直接序列化 numpy 数组，需要 msgpack-numpy 编解码。
         connection.send(_pack_numpy(body))
         return _unpack_numpy(connection.recv())
 
@@ -600,18 +617,46 @@ def _prepare_server(connection: Any, *, model: str, task: str) -> None:
 
     if model == "lingbot":
         # 连上后第一条是 metadata（frame_chunk_size 等），随后 reset 清理历史。
-        metadata = _unpack_numpy(connection.recv())
+        # 该服务端收到的数组同样走 `__ndarray__` 编码，见 `_request`。
+        metadata = _unpack_ndarray(connection.recv())
         print(f"LingBot-VA metadata: {metadata}")
-        connection.send(_pack_numpy({"reset": True, "prompt": task}))
-        response = _unpack_numpy(connection.recv())
-        if response:
-            raise RuntimeError(f"LingBot-VA reset returned {response!r}, expected {{}}")
+        _reset_lingbot(connection, task)
         return
 
-    if model in {"pi05", "flexpi"}:
-        # OpenPI 系服务连接后先发一条 metadata，必须先消费掉。
+    if model == "pi05":
+        # OpenPI 服务连接后先发一条 metadata，必须先消费掉。
+        metadata = _unpack_ndarray(connection.recv())
+        print(f"{model} server metadata: {metadata}")
+        return
+
+    if model == "flexpi":
         metadata = _unpack_numpy(connection.recv())
         print(f"{model} server metadata: {metadata}")
+
+
+def _reset_lingbot(connection: Any, task: str, *, verbose: bool = True) -> None:
+    """Clear the LingBot-VA streaming state before the next chunk.
+
+    The server only encodes the observation through its streaming VAE while
+    ``frame_st_id`` is 0, and that VAE keeps its per-frame cache between
+    calls. A second observation request without an intervening reset reuses
+    the cache with a single-frame chunk and dies in ``time_conv`` with
+    ``Kernel size can't be greater than actual input size``. Resetting makes
+    every chunk an independent first chunk, matching this loop's design where
+    each chunk is re-inferred from the current observation.
+    """
+
+    connection.send(_pack_ndarray({"reset": True, "prompt": task}))
+    response = _unpack_ndarray(connection.recv())
+    # 新版服务端的 reset 回包会附带 server_timing（如 infer_ms），这不是错误。
+    unexpected = {key: value for key, value in response.items() if key != "server_timing"}
+    if unexpected:
+        raise RuntimeError(
+            "LingBot-VA reset returned unexpected keys "
+            f"{sorted(unexpected)}, expected {{}} or server_timing"
+        )
+    if verbose and response:
+        print(f"LingBot-VA reset: {response}")
 
 
 def _parse_actions(response: dict[str, Any], *, model: str) -> np.ndarray:
@@ -775,6 +820,60 @@ def _unpack(data: Any) -> dict[str, Any]:
     if not isinstance(frame, dict):
         raise RuntimeError(f"FastWAM server returned {type(frame).__name__}")
     return frame
+
+
+def _pack_ndarray(frame: dict[str, Any]) -> bytes:
+    """Pack a frame using the OpenPI server's ``__ndarray__`` array encoding.
+
+    The server unpacks with plain msgpack, so msgpack-numpy arrays arrive as
+    ordinary dicts there. Its own format is a map with bytes keys holding the
+    raw buffer, dtype and shape.
+    """
+
+    return msgpack.packb(frame, default=_encode_ndarray, use_bin_type=True)
+
+
+def _encode_ndarray(array: np.ndarray) -> dict[bytes, Any]:
+    contiguous = np.ascontiguousarray(array)
+    return {
+        b"__ndarray__": True,
+        b"data": contiguous.tobytes(),
+        b"dtype": contiguous.dtype.str,
+        b"shape": list(contiguous.shape),
+    }
+
+
+def _unpack_ndarray(data: Any) -> dict[str, Any]:
+    if isinstance(data, str):
+        raise RuntimeError(f"policy server returned text: {data}")
+    frame = msgpack.unpackb(
+        data, raw=False, strict_map_key=False, object_hook=_decode_ndarray
+    )
+    if not isinstance(frame, dict):
+        raise RuntimeError(f"policy server returned {type(frame).__name__}")
+    return frame
+
+
+def _decode_ndarray(obj: dict[Any, Any]) -> Any:
+    """Rebuild arrays from this server's ``__ndarray__`` or msgpack-numpy maps."""
+
+    def field(*names: str) -> Any:
+        for name in names:
+            for key in (name, name.encode()):
+                if key in obj:
+                    return obj[key]
+        return None
+
+    if field("__ndarray__"):
+        dtype, shape = field("dtype"), field("shape")
+    elif field("nd"):
+        # 兼容上游 OpenPI / msgpack-numpy 的数组格式。
+        dtype, shape = field("type"), field("shape")
+    else:
+        return obj
+    if isinstance(dtype, bytes):
+        dtype = dtype.decode()
+    return np.frombuffer(field("data"), dtype=np.dtype(dtype)).reshape(shape)
 
 
 def _pack_numpy(frame: dict[str, Any]) -> bytes:

@@ -122,5 +122,7 @@ rtc:
 
 
 task:
+  # file: "configs/tasks/pick_place_purple_block.yaml"
+  # file: "configs/tasks/pick_place_blocks.yaml"
   file: "configs/tasks/pick_place_pen_block.yaml"
   episode_count: 20
