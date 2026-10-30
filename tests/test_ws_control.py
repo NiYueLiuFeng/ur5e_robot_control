@@ -607,7 +607,7 @@ class LingBotProtocolTest(unittest.TestCase):
         self.assertFalse(np.any(actions == 99.0))
         np.testing.assert_array_equal(actions[0], np.zeros(7))
 
-    def test_run_executes_lingbot_actions(self):
+    def test_run_resets_before_every_chunk_without_streaming(self):
         from apps.run_ws_control import _run
 
         raw = np.zeros((7, 2, 2), dtype=np.float32)
@@ -633,13 +633,14 @@ class LingBotProtocolTest(unittest.TestCase):
             task="plug",
             max_steps=4,
             control_hz=1000.0,
+            streaming=False,
         )
 
         self.assertEqual(executed, 4)
         self.assertEqual(len(env.commands), 4)
         self.assertEqual(env.commands[0][-1], 1000.0)
         self.assertEqual(env.commands[1][-1], 0.0)
-        # 每块观测请求前都要先 reset，清空服务端 streaming VAE 的缓存。
+        # 回退模式：每块观测请求前都要先 reset，清空服务端 streaming VAE 的缓存。
         self.assertEqual(len(connection.sent), 4)
         from apps.run_ws_control import _unpack_ndarray
 
@@ -651,6 +652,90 @@ class LingBotProtocolTest(unittest.TestCase):
             _unpack_ndarray(connection.sent[2]),
             {"reset": True, "prompt": "plug"},
         )
+
+    def test_run_streams_lingbot_with_kv_cache(self):
+        from apps.run_ws_control import _run, _unpack_ndarray
+
+        # 2 个 latent frame x 4 条动作；1 个视频帧 = 1 条动作。
+        raw = np.zeros((7, 2, 4), dtype=np.float32)
+        raw[:6, 0, :] = 1.5  # 第一块的 context 块，永远不该被执行
+        raw[:6, 1, :] = 0.1
+        raw[6, 1, :] = [0.9, 0.1, 0.9, 0.1]
+        action_frame = msgpack_numpy.packb({"action": raw})
+        connection = FakeConnection(
+            [action_frame, msgpack_numpy.packb({}), action_frame]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="lingbot",
+            vla=make_vla(execute_horizon=1),
+            task="plug",
+            max_steps=12,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 12)
+        self.assertEqual(len(env.commands), 12)
+        # 第一块只执行最后 1 个 latent frame（4 条），context 块被丢掉。
+        np.testing.assert_allclose(env.commands[0][:6], 0.1)
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
+        # 之后每块都完整执行（execute_horizon 不生效），context 块也执行。
+        np.testing.assert_allclose(env.commands[4][:6], 1.5)
+        np.testing.assert_allclose(env.commands[8][:6], 0.1)
+        # 观测请求 -> compute_kv_cache -> 观测请求；不再每块 reset。
+        self.assertEqual(len(connection.sent), 3)
+        first = _unpack_ndarray(connection.sent[0])
+        self.assertNotIn("reset", first)
+        self.assertEqual(
+            set(first["obs"]),
+            {"observation.images.third_person", "observation.images.wrist"},
+        )
+        cache = _unpack_ndarray(connection.sent[1])
+        self.assertTrue(cache["compute_kv_cache"])
+        # state 必须是服务端刚返回的原始动作块，不能截断。
+        np.testing.assert_array_equal(cache["state"], raw)
+        # 第一块只执行 1 个 latent frame -> 回传 4 个关键帧。
+        self.assertEqual(len(cache["obs"]), 4)
+        self.assertEqual(
+            set(cache["obs"][0]),
+            {"observation.images.third_person", "observation.images.wrist"},
+        )
+        self.assertEqual(
+            cache["obs"][0]["observation.images.third_person"].shape, (8, 6, 3)
+        )
+        self.assertNotIn("reset", _unpack_ndarray(connection.sent[2]))
+
+    def test_run_skips_kv_cache_when_chunk_is_truncated(self):
+        from apps.run_ws_control import _run
+
+        raw = np.zeros((7, 2, 4), dtype=np.float32)
+        raw[:6, 1, :] = 0.1
+        raw[6, 1, :] = 0.9
+        action_frame = msgpack_numpy.packb({"action": raw})
+        connection = FakeConnection(
+            [action_frame, msgpack_numpy.packb({}), action_frame]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        # 第一块执行 4 条后喂 cache；第二块只执行 1 条就被 max_steps 截断。
+        executed = _run(
+            env,
+            connection,
+            model="lingbot",
+            vla=make_vla(),
+            task="plug",
+            max_steps=5,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 5)
+        # 截断的块不能喂 KV cache（帧数/动作数会对不上），也不再取响应。
+        self.assertEqual(len(connection.sent), 3)
+        self.assertEqual(connection.responses, [])
 
 
 class OpenWAMProtocolTest(unittest.TestCase):

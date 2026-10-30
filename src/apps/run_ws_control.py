@@ -7,8 +7,10 @@
   (token goes in the URL).
 - ``lingbot``: LingBot-VA msgpack frames using the server's ``__ndarray__``
   array encoding. The server sends metadata on connect, then accepts a
-  ``reset`` frame and one-frame ``obs`` requests; the client resets before
-  every request because the server's streaming VAE caches frames until reset.
+  ``reset`` frame, one-frame ``obs`` requests and ``compute_kv_cache``
+  requests. The client resets once per episode and then feeds every executed
+  chunk back with ``compute_kv_cache`` so the server keeps one continuous KV
+  history; ``--no-streaming`` restores the old reset-per-chunk fallback.
 - ``openwam``: OpenWAM JSON text frames with base64 PNG images. The server
   needs a ``ping`` / ``reset`` handshake before the first ``obs``.
 - ``pi05`` (alias ``openpi05``): OpenPI 0.5 msgpack frames using the server's
@@ -33,7 +35,8 @@ Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
 pressing N or T moves the arm back to ``robot.reset_joints``. With
 ``--save-video`` that reset first asks whether to keep the episode's merged
-third-person + wrist recording.
+third-person + wrist recording. For LingBot-VA an episode is also a server
+session: reset once, then keep the server's streaming KV cache up to date.
 """
 
 from __future__ import annotations
@@ -68,6 +71,9 @@ JOINT_LIMIT_RAD = 2.0 * math.pi
 NUM_INFERENCE_STEPS = 10
 # 每个动作块处理完后等待 20 ms，再发起下一次请求。
 CHUNK_WAIT_S = 0.02
+# LingBot-VA 的 VAE 时间压缩为 4：1 个 latent frame 对应 4 个视频帧，
+# 也就是 compute_kv_cache 里每个 latent frame 要回传 4 个关键帧。
+VIDEO_FRAMES_PER_LATENT = 4
 # json 协议：服务端图片键名 -> RobotEnv.get_obs() 键名。
 IMAGE_FIELDS = {"third_person": "third_left_top_rgb", "wrist": "wrist_rgb"}
 # fastwam 协议：服务端相机键名 -> RobotEnv.get_obs() 键名。
@@ -127,6 +133,20 @@ MODEL_SPECS = {
 }
 # 按这些键时让机械臂回到 robot.reset_joints（复位）。
 RESET_KEYS = ("n", "t")
+
+
+@dataclass
+class _LingbotStream:
+    """Client-side LingBot-VA streaming session.
+
+    ``first_chunk`` is true until the server has accepted one
+    ``compute_kv_cache`` request. On that first chunk the server fills the
+    leading latent block with the zero ``action_cond`` context instead of a
+    prediction, so the client must drop it from execution; every later chunk
+    is predicted in full.
+    """
+
+    first_chunk: bool = True
 
 
 class ResetKeyListener:
@@ -218,6 +238,14 @@ def build_parser() -> argparse.ArgumentParser:
         "whether to keep it when N/T resets the arm.",
     )
     parser.add_argument(
+        "--no-streaming",
+        dest="streaming",
+        action="store_false",
+        help="LingBot-VA only: reset the server before every chunk instead of "
+        "keeping its streaming KV cache up to date. Slower and less "
+        "continuous; keep it only as a fallback.",
+    )
+    parser.add_argument(
         "--no-openwam-chunk",
         dest="openwam_chunk",
         action="store_false",
@@ -300,6 +328,7 @@ def main(argv: list[str] | None = None) -> None:
             reset_joints=config.robot.reset_joints,
             video=video,
             dry_run=dry_run,
+            streaming=args.streaming,
             openwam_chunk=args.openwam_chunk,
         )
         print(f"Stopped after handling {steps} action(s).")
@@ -328,9 +357,15 @@ def _run(
     reset_joints: Any = None,
     video: EpisodeVideoRecorder | None = None,
     dry_run: bool = False,
+    streaming: bool = True,
     openwam_chunk: bool = True,
 ) -> int:
     """Run the request loop and return how many actions were handled.
+
+    ``streaming`` only affects LingBot-VA. When on (the default) the server is
+    reset once per episode and every executed chunk is fed back through
+    ``compute_kv_cache``; when off the client resets before each chunk and
+    treats it as an independent first chunk.
 
     ``openwam_chunk`` only affects OpenWAM. When on (the default) every obs asks
     the server for the whole action chunk instead of a single action, so the
@@ -348,6 +383,10 @@ def _run(
         action_hz = spec.action_hz
     period = 1.0 / action_hz if action_hz else 0.0
 
+    # LingBot-VA 原生 streaming：回合开始时 reset 一次，之后每块把
+    # "执行期间的关键帧 + 刚下发的动作块"喂回服务端更新 KV cache。
+    stream = _LingbotStream() if model == "lingbot" and streaming else None
+
     executed = 0
     request_id = 0
     # openwam 的"chunk 比 execute_horizon 长"提示只打一次，避免刷屏。
@@ -361,6 +400,10 @@ def _run(
         """Return the arm to the start pose and start a fresh server session."""
 
         _handle_reset(env, reset_joints, video)
+        if stream is not None:
+            # 服务端 reset 会清空 KV cache / 帧计数，下一条请求重新算第一块。
+            _reset_lingbot(connection, task, verbose=False)
+            stream.first_chunk = True
         if model == "openwam":
             # 丢掉服务端可能还攥着的动作缓冲，下一个 obs 一定按新位姿重推。
             # 复位是操作员的动作，服务端异常不该打断控制循环，所以只告警。
@@ -388,44 +431,60 @@ def _run(
                 request_id=request_id,
                 openwam_chunk=openwam_chunk,
             )
-            if model == "lingbot":
-                # 服务端的 streaming VAE 缓存只在 reset 时清空，而每块都要重新
-                # 编码当前观测；不 reset 的话第二块会报卷积核大于输入。
+            if model == "lingbot" and stream is None:
+                # 回退模式：每块都 reset，让服务端把它当成独立的第一块。
                 _reset_lingbot(connection, task, verbose=False)
             # 一问一答：观测发给服务端，拿回一个动作块。
             response = _request(connection, body, model=model)
-            actions = _parse_actions(response, model=model)
+            raw_chunk = None
+            if stream is not None:
+                # streaming 下需要保留原始 (C, latent, per_frame) 块当 state。
+                raw_chunk = _lingbot_raw_chunk(response)
+                actions = _lingbot_actions(
+                    raw_chunk, drop_context=stream.first_chunk
+                )
+            else:
+                actions = _parse_actions(response, model=model)
             # 单臂 UR5 的动作必须是 7 维；dry-run 只告警，真机执行前直接报错。
             _check_action_shape(actions, model=model, warn_only=dry_run)
             shape_ok = actions.shape[1] == ACTION_DIM
-            # 只处理前 execute_horizon 条，剩余动作丢弃，下一轮重新请求。
-            if (
-                model == "openwam"
-                and len(actions) > vla.execute_horizon
-                and not chunk_hint_printed
-            ):
-                # 整块拿到了却只执行一部分：这说明 execute_horizon 比 chunk 短，
-                # 每个 chunk 都会多花一次完整推理。想跑满就把它设成 chunk 长度。
-                print(
-                    f"OpenWAM returned {len(actions)} actions, but "
-                    f"vla.execute_horizon={vla.execute_horizon}: only the first "
-                    f"{vla.execute_horizon} are executed, then the server replans. "
-                    "Set vla.execute_horizon to the chunk length (32 for the ur5 "
-                    "checkpoints) to execute whole chunks."
-                )
-                chunk_hint_printed = True
-            actions = actions[: vla.execute_horizon]
+            if stream is None:
+                # 只处理前 execute_horizon 条，剩余动作丢弃，下一轮重新请求。
+                if (
+                    model == "openwam"
+                    and len(actions) > vla.execute_horizon
+                    and not chunk_hint_printed
+                ):
+                    # 整块拿到了却只执行一部分：这说明 execute_horizon 比 chunk 短，
+                    # 每个 chunk 都会多花一次完整推理。想跑满就把它设成 chunk 长度。
+                    print(
+                        f"OpenWAM returned {len(actions)} actions, but "
+                        f"vla.execute_horizon={vla.execute_horizon}: only the first "
+                        f"{vla.execute_horizon} are executed, then the server replans. "
+                        "Set vla.execute_horizon to the chunk length (32 for the ur5 "
+                        "checkpoints) to execute whole chunks."
+                    )
+                    chunk_hint_printed = True
+                actions = actions[: vla.execute_horizon]
+            # else: streaming 必须整块执行，服务端 KV cache 的帧数和回传的
+            #       动作块一一对应，截断会让后续块错位。
             if model != "json" and len(actions):
                 print(
                     f"{model} actions: shape={actions.shape} "
                     f"first={np.round(actions[0], 4).tolist()}"
                 )
-            for action in actions:
+            key_frames: list[dict[str, np.ndarray]] = []
+            actions_per_video_frame = (
+                _actions_per_video_frame(raw_chunk) if raw_chunk is not None else 0
+            )
+            completed_chunk = False
+            for index, action in enumerate(actions):
                 if reset_key.take():
                     # 复位后丢弃剩下的动作，下一轮按新位姿重新请求。
                     reset_episode()
                     break
                 started = time.monotonic()
+                step_obs = None
                 if dry_run:
                     # 预览模式：不碰机器人，只按同样的节奏维持循环。
                     if spec.executable and shape_ok:
@@ -452,7 +511,7 @@ def _run(
                         max_joint_delta=max_joint_delta,
                     )
                     # RobotEnv.step 会做安全限位，并按 control_hz 控制下发节奏。
-                    env.step(command)
+                    step_obs = env.step(command)
                     if video is not None:
                         # 每条动作后取一帧，recorder 内部按 fps 抽帧。
                         video.add(env.get_obs())
@@ -462,9 +521,26 @@ def _run(
                         if remaining > 0:
                             time.sleep(remaining)
                     reference = command[:6].copy()
+                if actions_per_video_frame and (
+                    (index + 1) % actions_per_video_frame == 0
+                ):
+                    # 每 4 个视频帧 = 1 个 latent frame，服务端每个 latent
+                    # frame 要一个关键帧；用刚执行完动作后的观测。
+                    frame_obs = (
+                        step_obs if isinstance(step_obs, dict) else env.get_obs()
+                    )
+                    key_frames.append(_lingbot_images(frame_obs))
+                completed_chunk = index + 1 == len(actions)
                 executed += 1
                 if max_steps is not None and executed >= max_steps:
                     break
+            stopping = max_steps is not None and executed >= max_steps
+            if stream is not None and completed_chunk and not stopping:
+                # 只有整块执行完才能喂历史：服务端按回传的动作数和关键帧数
+                # 推进 frame_st_id，只执行一半会错位。中途复位/停止时跳过，
+                # 下一轮会重新 reset 服务端。
+                _send_lingbot_kv_cache(connection, key_frames, raw_chunk)
+                stream.first_chunk = False
             request_id += 1
             # 每个动作块处理完停 20 ms，再向服务端请求下一个 chunk。
             time.sleep(CHUNK_WAIT_S)
@@ -513,13 +589,8 @@ def get_model_body(
 
     if model == "lingbot":
         # LingBot-VA 的生成请求：obs 是 {cam_key: HWC RGB uint8}。
-        return {
-            "obs": {
-                name: _to_hwc_uint8(obs[obs_key])
-                for name, obs_key in LINGBOT_IMAGE_FIELDS.items()
-            },
-            "prompt": task,
-        }
+        # compute_kv_cache 请求的关键帧也用同一套键名，见 `_lingbot_images`。
+        return {"obs": _lingbot_images(obs), "prompt": task}
 
     if model == "flexpi":
         # Flex-π 需要 13 维 HS13 状态（位置、姿态、夹爪宽度、力、力矩）。
@@ -575,6 +646,15 @@ def get_model_body(
             name: _encode_jpeg(obs[key], jpeg_quality)
             for name, key in IMAGE_FIELDS.items()
         },
+    }
+
+
+def _lingbot_images(obs: dict[str, Any]) -> dict[str, np.ndarray]:
+    """Build the LingBot-VA camera dict from a `RobotEnv.get_obs()` snapshot."""
+
+    return {
+        name: _to_hwc_uint8(obs[obs_key])
+        for name, obs_key in LINGBOT_IMAGE_FIELDS.items()
     }
 
 
@@ -700,15 +780,15 @@ def _prepare_server(connection: Any, *, model: str, task: str) -> None:
 
 
 def _reset_lingbot(connection: Any, task: str, *, verbose: bool = True) -> None:
-    """Clear the LingBot-VA streaming state before the next chunk.
+    """Start a fresh LingBot-VA episode: frame counter and VAE cache cleared.
 
     The server only encodes the observation through its streaming VAE while
     ``frame_st_id`` is 0, and that VAE keeps its per-frame cache between
-    calls. A second observation request without an intervening reset reuses
-    the cache with a single-frame chunk and dies in ``time_conv`` with
-    ``Kernel size can't be greater than actual input size``. Resetting makes
-    every chunk an independent first chunk, matching this loop's design where
-    each chunk is re-inferred from the current observation.
+    calls. In streaming mode this is called once per episode (start, or N/T
+    reset) and ``compute_kv_cache`` carries the cache forward afterwards. In
+    the ``--no-streaming`` fallback it is called before every chunk, so each
+    chunk is an independent first chunk and never hits ``time_conv``'s
+    ``Kernel size can't be greater than actual input size``.
     """
 
     connection.send(_pack_ndarray({"reset": True, "prompt": task}))
@@ -786,10 +866,11 @@ def _parse_actions(response: dict[str, Any], *, model: str) -> np.ndarray:
 def _lingbot_chunk(response: dict[str, Any]) -> np.ndarray:
     """Flatten LingBot-VA's `(C, chunk, actions_per_frame)` action block.
 
-    The first latent frame is the model's zero context block, not a prediction
-    (``align_actions`` leaves it empty during training and ``_infer`` overwrites
-    it with ``action_cond``). Because this client re-infers from the current
-    observation on every request, that block must be dropped before execution.
+    Only used by the reset-per-chunk fallback (``--no-streaming``): every
+    request starts a fresh episode, so the leading latent frame is always the
+    zero context block, not a prediction (``align_actions`` leaves it empty
+    during training and ``_infer`` overwrites it with ``action_cond``), and
+    must be dropped before execution.
     """
 
     if "action" not in response:
@@ -799,18 +880,90 @@ def _lingbot_chunk(response: dict[str, Any]) -> np.ndarray:
         return raw
     if raw.ndim != 3:
         raise ValueError(f"LingBot-VA action must be 2-D or 3-D, got {raw.shape}")
+    return _lingbot_actions(raw, drop_context=True)
 
-    # (action_dim, latent_frames, actions_per_frame) -> (N, action_dim)
+
+def _lingbot_raw_chunk(response: dict[str, Any]) -> np.ndarray:
+    """Return LingBot-VA's raw `(C, latent_frames, actions_per_frame)` block."""
+
+    if "action" not in response:
+        raise KeyError("LingBot-VA response is missing 'action'")
+    raw = np.asarray(response["action"], dtype=float)
+    if raw.ndim != 3:
+        raise ValueError(
+            "LingBot-VA streaming needs a 3-D action block "
+            f"(C, latent_frames, actions_per_frame), got shape {raw.shape}"
+        )
+    return raw
+
+
+def _lingbot_actions(raw: np.ndarray, *, drop_context: bool) -> np.ndarray:
+    """Flatten `(C, latent_frames, per_frame)` into time-ordered `(N, C)` rows.
+
+    ``drop_context`` discards the leading latent frame, which the server fills
+    with zero conditioning actions on the first chunk of a session.
+    """
+
     dim, frames, per_frame = raw.shape
     actions = raw.transpose(1, 2, 0).reshape(frames * per_frame, dim)
-    # 丢掉第 0 帧（per_frame 条）的上下文块。
-    actions = np.ascontiguousarray(actions[per_frame:])
+    if drop_context:
+        actions = actions[per_frame:]
     if not actions.size:
         raise RuntimeError(
             "LingBot-VA returned only the context block; "
             "check frame_chunk_size and the checkpoint"
         )
-    return actions
+    if not np.isfinite(actions).all():
+        raise ValueError("LingBot-VA actions must contain finite values")
+    return np.ascontiguousarray(actions)
+
+
+def _actions_per_video_frame(raw_chunk: np.ndarray) -> int:
+    """How many actions one VAE video frame covers (e.g. 12 / 4 = 3)."""
+
+    per_latent_frame = int(raw_chunk.shape[2])
+    if per_latent_frame % VIDEO_FRAMES_PER_LATENT:
+        raise ValueError(
+            "LingBot-VA actions_per_frame must be divisible by "
+            f"{VIDEO_FRAMES_PER_LATENT}, got {per_latent_frame}"
+        )
+    return per_latent_frame // VIDEO_FRAMES_PER_LATENT
+
+
+def _send_lingbot_kv_cache(
+    connection: Any,
+    key_frames: list[dict[str, np.ndarray]],
+    raw_chunk: np.ndarray,
+) -> None:
+    """Feed executed key frames + actions into the server's streaming KV cache.
+
+    ``state`` is the exact block the server returned: the server pairs each
+    latent frame of it with the encoded key frames, so a mismatch shifts
+    ``frame_st_id`` and corrupts every later chunk. The first chunk of a
+    session only executes (and therefore only caches) its last latent frame;
+    the server prepends the initial observation latent itself.
+    """
+
+    if not key_frames:
+        raise RuntimeError("LingBot-VA streaming produced no key frames")
+    if len(key_frames) % VIDEO_FRAMES_PER_LATENT:
+        raise RuntimeError(
+            "LingBot-VA key frames must be a whole number of latent frames, "
+            f"got {len(key_frames)}"
+        )
+    connection.send(
+        _pack_ndarray(
+            {"obs": key_frames, "state": raw_chunk, "compute_kv_cache": True}
+        )
+    )
+    response = _unpack_ndarray(connection.recv())
+    # 新版服务端的回包附带 server_timing（如 infer_ms），其余键都是错误。
+    unexpected = {key: value for key, value in response.items() if key != "server_timing"}
+    if unexpected:
+        raise RuntimeError(
+            "LingBot-VA compute_kv_cache returned unexpected keys "
+            f"{sorted(unexpected)}, expected {{}} or server_timing"
+        )
 
 
 def _check_action_shape(

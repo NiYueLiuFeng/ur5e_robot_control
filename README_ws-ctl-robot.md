@@ -241,6 +241,7 @@ uv run ws-control \
 | `--action-hz` | 覆盖动作下发帧率（Hz） |
 | `--max-joint-delta` | 覆盖单关节限幅（rad），`none` 表示关闭 |
 | `--save-video [BOOL]` | 录制单次 episode 的录像，`true`/不带值开启，默认关闭（见 5.1） |
+| `--no-streaming` | LingBot-VA 改回每块 reset 的旧策略，默认用流式 `compute_kv_cache`（见 7.2） |
 | `--no-openwam-chunk` | OpenWAM 改回每步只请求一个动作（原版协议），默认请求整块（见 7.3） |
 
 ### 5.1 保存 episode 视频
@@ -389,14 +390,36 @@ dict，服务端 `torch.from_numpy` 会报 `numpy.object_` 类型错误：
 1. 建连后服务端先发一条 metadata（`frame_chunk_size` 等；当前部署回 `{}`），客户端消费掉；
 2. 客户端发 `{"reset": true, "prompt": ...}`，服务端回 `{}`，或只带
    `server_timing`（如 `{"server_timing": {"infer_ms": 76.9}}`），两种都接受；
-3. 之后每轮发观测，`obs` 里的图像同样用 `__ndarray__` 数组。
+3. 之后每轮发观测，`obs` 里的图像同样用 `__ndarray__` 数组，服务端回一个
+   动作块；
+4. 动作块执行完，把执行期间的关键帧和刚收到的原始动作块发回服务端：
 
-每轮观测请求前都要再发一次 `reset`。服务端只在 `frame_st_id == 0` 时编码观测，
-而 streaming VAE 的 `feat_cache` 会跨调用保留；连续两次不发 reset 的观测请求，
-第二次会拿单帧输入去拼缓存，在 `time_conv` 报
-`Kernel size can't be greater than actual input size`。本入口每块都从当前观测
-重新推理、不用 `compute_kv_cache`，所以 reset 让每块都等价于独立的第一块
-（每块多约 0.1–0.2 s）。
+   ```json
+   {"obs": [<关键帧>, ...], "state": <原始 action 块>, "compute_kv_cache": true}
+   ```
+
+   服务端回 `{}` 或只带 `server_timing`，并推进 `frame_st_id` / KV cache。
+   下一条观测请求接着这份缓存继续推理，不再 reset。
+
+默认就是上面的流式模式（服务端原生 `compute_kv_cache`）：
+
+- `reset` 只在建连时和按 N/T 复位时各发一次；
+- 每个动作块必须**整块执行**（`vla.execute_horizon` 对 `lingbot` 不生效），
+  服务端按回传的动作数推进帧计数，截断会让后续块错位；
+- 关键帧按 VAE 视频帧取：`actions_per_frame=12`、时间压缩 4，所以每 3 条
+  动作（12/4）取一帧，用执行完该动作后的观测；
+- `state` 必须是服务端返回的原始 `(7, latent, per_frame)` 数组，不能转置或截断；
+- 每回合第一块只执行最后 1 个 latent frame（前面的 context 块是零条件，不执行），
+  因此只回传 4 个关键帧，服务端自己补上初始观测的 latent；
+- 中途复位或达到 `--max-steps` 时不会发送半块的 cache：复位会重新 reset 服务端，
+  停止则直接退出。
+
+`--no-streaming` 回退到旧策略：每块观测请求前都发一次 `reset`，让每块都等价于
+独立的第一块。服务端只在 `frame_st_id == 0` 时编码观测，而 streaming VAE 的
+`feat_cache` 会跨调用保留；连续两次不发 reset 的观测请求，第二次会拿单帧输入去
+拼缓存，在 `time_conv` 报 `Kernel size can't be greater than actual input size`。
+回退模式每块多约 0.1–0.2 s 的 reset，而且每块都是"从当前观测重新起步"的
+off-distribution 推理，动作连续性明显更差。
 
 | 请求字段 | 来源 |
 | --- | --- |
@@ -404,11 +427,10 @@ dict，服务端 `torch.from_numpy` 会报 `numpy.object_` 类型错误：
 | `obs["observation.images.wrist"]` | `wrist_rgb`，HWC RGB uint8 |
 | `prompt` | `task.file` 的 `task`，或 `--task` |
 
-响应 `action` 形状是 `(7, chunk, actions_per_frame)`。客户端先转成
-`(N, 7)`，**丢弃第 0 帧的 context 块**（训练时对齐到全零，推理时由
-`_infer` 用 `action_cond` 覆盖，不是预测值），再按 `execute_horizon` 执行。
-本入口每轮都从当前观测重新推理、不调用 `compute_kv_cache`，所以每块都
-需要丢弃这一帧。
+响应 `action` 形状是 `(7, chunk, actions_per_frame)`。客户端先转成 `(N, 7)`，
+并按块决定是否**丢弃第 0 帧的 context 块**（训练时对齐到全零，推理时由
+`_infer` 用 `action_cond` 覆盖，不是预测值）：流式模式下只有每回合的第一块
+需要丢，之后的块都是完整预测；`--no-streaming` 回退模式每块都丢。
 
 可执行的是 `ur5` profile / `ur5_joint30_v1` 检查点；`huashu`、`guodi`、
 `xinsong` 的 profile 维度不同，会在维度检查处报错并提示换检查点。
