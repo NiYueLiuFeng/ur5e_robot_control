@@ -749,6 +749,102 @@ class OpenWAMProtocolTest(unittest.TestCase):
         self.assertEqual(executed, 2)
         self.assertEqual([command[-1] for command in env.commands], [1000.0, 0.0])
 
+    def test_body_requests_chunk_only_when_enabled(self):
+        from apps.run_ws_control import get_model_body
+
+        chunked = get_model_body(
+            self.obs, model="openwam", task="pick", openwam_chunk=True
+        )
+        stepped = get_model_body(
+            self.obs, model="openwam", task="pick", openwam_chunk=False
+        )
+
+        self.assertIs(chunked["chunk"], True)
+        self.assertNotIn("chunk", stepped)
+        # 两种模式下 obs 的其余字段完全一致。
+        self.assertEqual(
+            {k: v for k, v in chunked.items() if k != "chunk"}, stepped
+        )
+
+    def test_parse_actions_accepts_actions_frame(self):
+        from apps.run_ws_control import _parse_actions
+
+        actions = _parse_actions(
+            {
+                "type": "actions",
+                "actions": [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]],
+                "count": 2,
+            },
+            model="openwam",
+        )
+
+        self.assertEqual(actions.shape, (2, 7))
+        self.assertAlmostEqual(actions[1, 6], 0.1)
+
+    def test_parse_actions_rejects_chunk_count_mismatch(self):
+        from apps.run_ws_control import _parse_actions
+
+        with self.assertRaisesRegex(ValueError, "count=3"):
+            _parse_actions(
+                {"type": "actions", "actions": [[0.1] * 7], "count": 3},
+                model="openwam",
+            )
+
+    def test_request_accepts_actions_frame(self):
+        from apps.run_ws_control import _request
+
+        frame = {"type": "actions", "actions": [[0.1] * 7], "count": 1}
+        connection = FakeConnection([json.dumps(frame)])
+
+        self.assertEqual(_request(connection, {"type": "obs"}, model="openwam"), frame)
+
+    def test_run_executes_returned_chunk(self):
+        from apps.run_ws_control import _run
+
+        chunk = [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1], [0.3] * 6 + [0.9]]
+        connection = FakeConnection(
+            [json.dumps({"type": "actions", "actions": chunk, "count": 3})]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="openwam",
+            vla=make_vla(execute_horizon=3),
+            task="pick",
+            max_steps=3,
+            control_hz=1000.0,
+        )
+
+        # 一次 obs 换回整块动作，三条都执行，夹爪按 threshold 二值化。
+        self.assertEqual(executed, 3)
+        self.assertEqual([command[-1] for command in env.commands], [1000.0, 0.0, 1000.0])
+        self.assertIs(json.loads(connection.sent[0])["chunk"], True)
+        self.assertEqual(len(connection.sent), 1)
+
+    def test_run_can_disable_chunk_requests(self):
+        from apps.run_ws_control import _run
+
+        connection = FakeConnection(
+            [json.dumps({"type": "action", "action": [0.1] * 6 + [0.9]})]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="openwam",
+            vla=make_vla(execute_horizon=1),
+            task="pick",
+            max_steps=1,
+            control_hz=1000.0,
+            openwam_chunk=False,
+        )
+
+        self.assertEqual(executed, 1)
+        self.assertNotIn("chunk", json.loads(connection.sent[0]))
+
 
 class RobotCommandTest(unittest.TestCase):
     def test_command_binarizes_gripper(self):

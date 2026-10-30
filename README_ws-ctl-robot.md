@@ -241,6 +241,7 @@ uv run ws-control \
 | `--action-hz` | 覆盖动作下发帧率（Hz） |
 | `--max-joint-delta` | 覆盖单关节限幅（rad），`none` 表示关闭 |
 | `--save-video [BOOL]` | 录制单次 episode 的录像，`true`/不带值开启，默认关闭（见 5.1） |
+| `--no-openwam-chunk` | OpenWAM 改回每步只请求一个动作（原版协议），默认请求整块（见 7.3） |
 
 ### 5.1 保存 episode 视频
 
@@ -428,10 +429,39 @@ JSON 文本协议，带探活和重置握手：
 | `images["right_wrist_camera"]` | 固定 `null`（单腕机器人） |
 | `state` | 7 维关节状态 |
 | `prompt` | `task.file` 的 `task`，或 `--task` |
+| `chunk` | 固定 `true`（见下方"动作块模式"），`--no-openwam-chunk` 时省略 |
 
-响应为 `{"type": "action", "action": ...}`；`{"type": "error", ...}` 会
+响应为 `{"type": "action", "action": ...}` 或 `{"type": "actions",
+"actions": [[...], ...], "count": n}`；`{"type": "error", ...}` 会
 抛错并停止。使用 `ur5` 数据集（7 维、夹爪 0 闭 / 1 开、15 Hz）；
 `hs` / `flexiv` 是 10 维 EEF，不能用。
+
+#### 动作块模式（chunk）
+
+原版服务端每个 `obs` 只回一条动作：模型内部一次推理产出 32 步
+（`num_frames - 1`），服务端按 receding horizon 逐帧弹出，客户端因此
+**每个控制步都要采图、编码 PNG、上传、再等一次回包**。
+
+打上 `02_serve/patches/` 里的 chunk 补丁后，`obs` 带 `"chunk": true` 会
+直接回整块：
+
+```json
+{"type": "actions", "actions": [[0.27, -0.16, ...], ...], "count": 32,
+ "step": 1, "latency_ms": 181.0}
+```
+
+本入口默认就发 `"chunk": true`，并且**两种回包都能处理**——没打补丁的
+服务端会忽略这个未知字段、照旧每步回一个 `action`，客户端自动按逐条
+模式跑，不需要改配置。
+
+- 想跑满整块：把 `vla.execute_horizon` 设成服务端的 chunk 长度（`ur5`
+  检查点是 **32**）。若 `execute_horizon` 比 chunk 短，客户端只执行前 N
+  条、剩下的丢弃，下一次请求会触发一次完整推理（首次出现时会打印提示）。
+- `--no-openwam-chunk` 回到逐条请求，只在对端是原版服务端或调试步进时用。
+- 顺带效果：按 N/T 复位时会向服务端补发一次 `reset`，丢掉服务端可能还
+  攥着的旧动作缓冲。
+- 实测（`ur5` / `checkpoint_step_40500`，本机 loopback）：32 步逐条请求
+  约 600 ms，一次 chunk 请求约 180 ms，主要省在 31 次采图 + 编码 + 上传。
 
 ### 7.4 OpenPI 0.5（`--model pi05`）
 

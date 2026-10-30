@@ -111,6 +111,12 @@ vla:
   # model: "lingbot"
   # model: "openwam"
   # model: "pi05"
+  #
+  # openwam 走动作块（chunk）：客户端每次 obs 都带 "chunk": true，服务端一次
+  # 回整块（ur5 检查点 = 32 步）。此时把 execute_horizon 设成 32 就会整块执行、
+  # 每 32 步才采图+上传一次；保持 15 则只执行前 15 条、每 15 步重推一次（会打印
+  # 一次提示）。对端是没打补丁的原版服务端也没关系：它忽略该字段，客户端自动
+  # 退回逐条模式。想强制走逐条：ws-control --no-openwam-chunk。
 rtc:
   enabled: true
   config:

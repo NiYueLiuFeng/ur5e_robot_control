@@ -96,6 +96,10 @@ OPENWAM_IMAGE_FIELDS = {
     "left_wrist_camera": "wrist_rgb",
     "right_wrist_camera": None,
 }
+# openwam 动作块请求字段：服务端打上 chunk 补丁后，obs 里带 "chunk": true 会回
+# {"type": "actions", "actions": [[...], ...]}（整块，默认 32 步）。原版服务端
+# 忽略这个未知字段、照旧每步回一个 action，所以两种回包都要能处理。
+OPENWAM_CHUNK_FIELD = "chunk"
 
 
 @dataclass(frozen=True)
@@ -213,6 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record one episode's merged third-person + wrist video and ask "
         "whether to keep it when N/T resets the arm.",
     )
+    parser.add_argument(
+        "--no-openwam-chunk",
+        dest="openwam_chunk",
+        action="store_false",
+        help="OpenWAM only: ask for one action per obs (the original protocol) "
+        "instead of the whole action chunk. Only useful against an unpatched "
+        "server or when debugging the stepping path.",
+    )
     return parser
 
 
@@ -288,6 +300,7 @@ def main(argv: list[str] | None = None) -> None:
             reset_joints=config.robot.reset_joints,
             video=video,
             dry_run=dry_run,
+            openwam_chunk=args.openwam_chunk,
         )
         print(f"Stopped after handling {steps} action(s).")
     except KeyboardInterrupt:
@@ -315,8 +328,16 @@ def _run(
     reset_joints: Any = None,
     video: EpisodeVideoRecorder | None = None,
     dry_run: bool = False,
+    openwam_chunk: bool = True,
 ) -> int:
-    """Run the request loop and return how many actions were handled."""
+    """Run the request loop and return how many actions were handled.
+
+    ``openwam_chunk`` only affects OpenWAM. When on (the default) every obs asks
+    the server for the whole action chunk instead of a single action, so the
+    client uploads one observation per chunk rather than one per step. A server
+    without the chunk patch ignores the request field and keeps replying with
+    one action per obs, which this loop still handles unchanged.
+    """
 
     model = _normalize_model(model)
     # 即使调用方直接进 _run，也不允许把 EEF 位姿当关节角下发。
@@ -329,14 +350,32 @@ def _run(
 
     executed = 0
     request_id = 0
+    # openwam 的"chunk 比 execute_horizon 长"提示只打一次，避免刷屏。
+    chunk_hint_printed = False
     # 按 N/T 回到 robot.reset_joints；dry-run 不动机器人，不需要监听。
     reset_key = ResetKeyListener()
     if reset_joints is not None and not dry_run:
         reset_key.start()
+
+    def reset_episode() -> None:
+        """Return the arm to the start pose and start a fresh server session."""
+
+        _handle_reset(env, reset_joints, video)
+        if model == "openwam":
+            # 丢掉服务端可能还攥着的动作缓冲，下一个 obs 一定按新位姿重推。
+            # 复位是操作员的动作，服务端异常不该打断控制循环，所以只告警。
+            try:
+                _send_json(connection, {"type": "reset"})
+                ack = _read_json(connection)
+                if ack.get("type") != "reset_ack":
+                    print(f"WARNING: OpenWAM reset returned {ack!r}")
+            except Exception as exc:  # 复位失败不影响继续运行
+                print(f"WARNING: OpenWAM reset failed: {exc}")
+
     try:
         while max_steps is None or executed < max_steps:
             if reset_key.take():
-                _handle_reset(env, reset_joints, video)
+                reset_episode()
             # 每轮重新取一次观测，交给 get_model_body 组装请求。
             obs = env.get_obs()
             # 限幅参考：本轮开始时的实际关节角，逐条下发后更新为刚下发的目标。
@@ -347,6 +386,7 @@ def _run(
                 repo_id=vla.repo_id,
                 task=task,
                 request_id=request_id,
+                openwam_chunk=openwam_chunk,
             )
             if model == "lingbot":
                 # 服务端的 streaming VAE 缓存只在 reset 时清空，而每块都要重新
@@ -359,6 +399,21 @@ def _run(
             _check_action_shape(actions, model=model, warn_only=dry_run)
             shape_ok = actions.shape[1] == ACTION_DIM
             # 只处理前 execute_horizon 条，剩余动作丢弃，下一轮重新请求。
+            if (
+                model == "openwam"
+                and len(actions) > vla.execute_horizon
+                and not chunk_hint_printed
+            ):
+                # 整块拿到了却只执行一部分：这说明 execute_horizon 比 chunk 短，
+                # 每个 chunk 都会多花一次完整推理。想跑满就把它设成 chunk 长度。
+                print(
+                    f"OpenWAM returned {len(actions)} actions, but "
+                    f"vla.execute_horizon={vla.execute_horizon}: only the first "
+                    f"{vla.execute_horizon} are executed, then the server replans. "
+                    "Set vla.execute_horizon to the chunk length (32 for the ur5 "
+                    "checkpoints) to execute whole chunks."
+                )
+                chunk_hint_printed = True
             actions = actions[: vla.execute_horizon]
             if model != "json" and len(actions):
                 print(
@@ -368,7 +423,7 @@ def _run(
             for action in actions:
                 if reset_key.take():
                     # 复位后丢弃剩下的动作，下一轮按新位姿重新请求。
-                    _handle_reset(env, reset_joints, video)
+                    reset_episode()
                     break
                 started = time.monotonic()
                 if dry_run:
@@ -426,12 +481,17 @@ def get_model_body(
     repo_id: str = "",
     request_id: int = 0,
     jpeg_quality: int = 90,
+    openwam_chunk: bool = False,
 ) -> dict[str, Any]:
     """返回固定格式的请求 body。
 
     图片键名分别是 `IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS`、`PI05_IMAGE_FIELDS`、
     `LINGBOT_IMAGE_FIELDS`、`FLEXPI_IMAGE_FIELDS` 和 `OPENWAM_IMAGE_FIELDS`。
     换模型要改字段时，直接改这几个常量。
+
+    `openwam_chunk` 只影响 openwam：置 True 时在 obs 里带 `"chunk": true`，请求
+    服务端一次返回整个动作块。未打补丁的服务端会忽略这个字段，回包仍是单条
+    action，客户端按回包类型自动降级，见 `_parse_actions`。
     """
 
     model = _normalize_model(model)
@@ -474,7 +534,7 @@ def get_model_body(
 
     if model == "openwam":
         # OpenWAM 是 JSON 文本帧；图像是 base64 PNG 裸串，缺失的相机发 null。
-        return {
+        body = {
             "type": "obs",
             "images": {
                 name: (None if obs_key is None else _encode_png_b64(obs[obs_key]))
@@ -483,6 +543,9 @@ def get_model_body(
             "prompt": task,
             "state": state,
         }
+        if openwam_chunk:
+            body[OPENWAM_CHUNK_FIELD] = True
+        return body
 
     if model == "fastwam":
         # 参考 FastWAM 的 infer 帧：图片是原始 JPEG 字节，不是 base64。
@@ -579,7 +642,9 @@ def _request(connection: Any, body: dict[str, Any], *, model: str) -> dict[str, 
             raise RuntimeError(
                 f"{response.get('code', 'ERROR')}: {response.get('message', '')}"
             )
-        if response.get("type") != "action":
+        # 两种合法回包：原版的单条 action，和 chunk 补丁的整块 actions。
+        # 服务端没打补丁时会忽略请求里的 "chunk"，这里照样能跑逐条模式。
+        if response.get("type") not in {"action", "actions"}:
             raise RuntimeError(
                 f"unexpected OpenWAM frame type: {response.get('type')!r}"
             )
@@ -666,11 +731,25 @@ def _parse_actions(response: dict[str, Any], *, model: str) -> np.ndarray:
 
     if model == "openwam":
         frame = response
-        if frame.get("type") != "action":
-            raise RuntimeError(f"unexpected OpenWAM frame type: {frame.get('type')!r}")
-        actions = np.asarray(frame.get("action", []), dtype=float)
-        if actions.ndim == 1:
-            actions = actions[None, :]
+        kind = frame.get("type")
+        if kind == "actions":
+            # chunk 补丁的整块回包：动作在 `actions`，可能是一次推理的全部 32 步。
+            actions = np.asarray(frame.get("actions", []), dtype=float)
+            if actions.ndim == 1:
+                actions = actions[None, :]
+            count = frame.get("count")
+            if isinstance(count, int) and not isinstance(count, bool) and count != len(actions):
+                raise ValueError(
+                    f"OpenWAM chunk says count={count} but carries {len(actions)} actions"
+                )
+        elif kind == "action":
+            # 原版服务端：每步一个动作。补丁服务端也可能在 `--no-openwam-chunk`
+            # 下走这条路径，所以两条都要支持。
+            actions = np.asarray(frame.get("action", []), dtype=float)
+            if actions.ndim == 1:
+                actions = actions[None, :]
+        else:
+            raise RuntimeError(f"unexpected OpenWAM frame type: {kind!r}")
     elif model == "lingbot":
         actions = _lingbot_chunk(response)
     elif model in {"fastwam", "pi05", "flexpi"}:
