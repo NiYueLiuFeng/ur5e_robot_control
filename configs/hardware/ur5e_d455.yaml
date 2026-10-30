@@ -97,7 +97,8 @@ vla:
   reset_on_start: true
   threshold: 0.7 ##0.7for block
   # ws-control 协议：json（默认）、fastwam、lingbot、openwam、
-  # pi05（旧名 openpi05）、flexpi。pi05 / flexpi 只能配合 --dry-run 预览。
+  # pi05（旧名 openpi05）、flexpi。除 flexpi 外都输出 7 维绝对关节角；
+  # flexpi 只有 13 维 HS13 末端状态，只能配合 --dry-run 预览。
   model: "json"
   # 动作下发帧率（Hz）。留空表示用协议默认值：json 跟随 robot.control_hz，
   # 其余模型按其训练帧率（15 Hz）下发。

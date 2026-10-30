@@ -416,11 +416,50 @@ class OpenPI05ProtocolTest(unittest.TestCase):
         from apps.run_ws_control import _ensure_executable
 
         with self.assertRaisesRegex(ValueError, "absolute 6-joint"):
-            _ensure_executable("pi05", dry_run=False)
-        with self.assertRaisesRegex(ValueError, "absolute 6-joint"):
             _ensure_executable("flexpi", dry_run=False)
-        _ensure_executable("pi05", dry_run=True)
+        _ensure_executable("flexpi", dry_run=True)
+        # pi05 交付的是绝对关节角，可以直接驱动 UR5e。
+        _ensure_executable("pi05", dry_run=False)
         _ensure_executable("fastwam", dry_run=False)
+
+    @unittest.skipIf(msgpack_numpy is None, "msgpack-numpy is not installed")
+    def test_joint_actions_drive_the_robot(self):
+        from apps.run_ws_control import _run
+
+        connection = FakeConnection(
+            [
+                msgpack_numpy.packb(
+                    {
+                        "actions": np.array(
+                            [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]],
+                            dtype=np.float32,
+                        )
+                    }
+                )
+            ]
+        )
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        executed = _run(
+            env,
+            connection,
+            model="pi05",
+            vla=make_vla(),
+            task="pick",
+            max_steps=2,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(env.commands), 2)
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
 
 
 class LingBotProtocolTest(unittest.TestCase):

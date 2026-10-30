@@ -435,7 +435,7 @@ PYTHONPATH=src python -m apps.run_ws_control \
 | `fastwam` | msgpack | 6 关节 + 夹爪（`autogen_mixed_ur5`） | ✅ |
 | `lingbot` | msgpack-numpy | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
-| `pi05`（旧名 `openpi05`） | msgpack-numpy | 绝对末端位姿 + 夹爪 | ❌ 仅 `--dry-run` |
+| `pi05`（旧名 `openpi05`） | msgpack-numpy | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
 
 `fastwam` 把原始 JPEG 字节和关节状态直接作为 `infer` 帧发送（无握手，token
@@ -443,8 +443,12 @@ PYTHONPATH=src python -m apps.run_ws_control \
 `{"reset": true, "prompt": ...}`，并把 `(dim, chunk, per_frame)` 响应里的
 零上下文动作块丢掉。`openwam` 先完成 `ping` → `reset` 握手，`representation`
 不是 `joint` 时直接拒绝，图像用 base64 PNG。`pi05` 和 `flexpi` 消费 OpenPI
-元数据帧、图像为 HWC uint8；它们的检查点面向其他机械臂，输出末端位姿，
-所以不加 `--dry-run` 会在连接机器人之前报错。
+元数据帧、图像为 HWC uint8；`pi05_huashu` 返回的是 `(N, 7)` 绝对关节角，
+可直接执行（服务端已完成反归一化和 Delta→ABS，客户端不要再加 state），
+而 `guodi`（20 维）/ `xinsong`（16 维）多臂检查点会被 7 维校验拦下，
+`flexiv` 的 7 维是 7 关节 Flexiv 臂、不能用于 UR5e。`flexpi` 的检查点面向
+Flexiv 机械臂，输出 13 维 HS13 末端状态，所以不加 `--dry-run` 会在连接
+机器人之前报错。
 
 无论哪个模型，返回动作不是 7 维时都会打印
 `WARNING: ... expected 7-dim single-arm UR5 actions, got D`；真机执行前直接

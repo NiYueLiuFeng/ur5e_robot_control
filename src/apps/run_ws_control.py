@@ -15,10 +15,16 @@
 Execution contract: the UR5e accepts absolute 6-joint + gripper commands, so
 only 7-value joint actions are sent to the robot. Every action is validated
 (finite, joint range, optional ``vla.max_joint_delta`` per-step limit) and the
-gripper is binarized to 0/1000 with ``vla.threshold``. ``pi05`` and ``flexpi``
-checkpoints deliver absolute EEF poses for other robots, so they can only run
-in preview mode (``--dry-run``); the delivered UR5 checkpoints are FastWAM
-``autogen_mixed_ur5``, LingBot-VA ``ur5`` and OpenWAM ``ur5``.
+gripper is binarized to 0/1000 with ``vla.threshold``. Every UR5 checkpoint
+returns absolute joint angles, so it drives the arm directly: FastWAM
+``autogen_mixed_ur5``, LingBot-VA ``ur5``, OpenWAM ``ur5`` and OpenPI
+``pi05`` (``pi05_huashu`` delivers ``(50, 7)`` absolute joints; the server
+already undoes normalization and delta->ABS, so the client must not add the
+state back). Non-UR5e ``pi05`` configs must not be executed: ``guodi``
+(20-dim) and ``xinsong`` (16-dim) fail the 7-dim check, and ``flexiv`` is a
+7-DOF arm whose 7 values are not a UR5e 6-joint + gripper command. ``flexpi``
+targets a Flexiv arm and delivers the 13-dim HS13 end-effector state, so it
+can only run in preview mode (``--dry-run``).
 
 Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
@@ -107,7 +113,7 @@ MODEL_SPECS = {
     "fastwam": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "lingbot": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "openwam": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
-    "pi05": ModelSpec("eef", 15.0, "绝对末端位姿 + 夹爪"),
+    "pi05": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "flexpi": ModelSpec("eef", 15.0, "13 维 HS13 绝对末端状态"),
 }
 # 按这些键时让机械臂回到 robot.reset_joints（复位）。
@@ -701,7 +707,10 @@ def _check_action_shape(
     elif model == "openwam":
         hint = " (load the OpenWAM 'ur5' dataset/checkpoint)"
     elif model == "pi05":
-        hint = " (pi05 checkpoints for other robots return EEF or multi-arm actions)"
+        hint = (
+            " (load the UR5e checkpoint OpenPI pi05_huashu; flexiv is a 7-DOF "
+            "arm and guodi/xinsong are multi-arm)"
+        )
     elif model == "flexpi":
         hint = " (Flex-π returns the 13-dim HS13 state)"
     message = (
@@ -724,8 +733,8 @@ def _ensure_executable(model: str, *, dry_run: bool) -> None:
     raise ValueError(
         f"model {model!r} returns {spec.note}, but the UR5e executes only "
         "absolute 6-joint + gripper commands. Use a UR5 checkpoint (FastWAM "
-        "autogen_mixed_ur5, LingBot-VA ur5, OpenWAM ur5) or pass --dry-run to "
-        "inspect the actions without moving the robot."
+        "autogen_mixed_ur5, LingBot-VA ur5, OpenWAM ur5, OpenPI pi05_huashu) "
+        "or pass --dry-run to inspect the actions without moving the robot."
     )
 
 

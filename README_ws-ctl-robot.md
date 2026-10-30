@@ -21,12 +21,15 @@
 | `fastwam` | FastWAM | msgpack | 6 关节 + 夹爪（`autogen_mixed_ur5`） | ✅ |
 | `lingbot` | LingBot-VA | msgpack-numpy | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | OpenWAM | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
-| `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack-numpy | 绝对末端位姿 + 夹爪 | ❌ 仅 `--dry-run` |
+| `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack-numpy | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | Flex-π | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
 
-UR5e 的 `servoJ` 只接受**绝对关节角**，所以 `pi05` / `flexpi` 这类输出末端
-位姿的检查点绝不能被当成关节角下发。程序启动时就会拒绝这类组合，
-除非显式加 `--dry-run`（只打印动作、不动机器人）。
+UR5e 的 `servoJ` 只接受**绝对关节角**，所以 `flexpi` 这类输出末端位姿的
+检查点绝不能被当成关节角下发。程序启动时就会拒绝这类组合，除非显式加
+`--dry-run`（只打印动作、不动机器人）。OpenPI 的 `pi05_huashu` 返回的是
+`(N, 7)` 绝对关节角，可直接执行；`guodi`（20 维）/ `xinsong`（16 维）是多臂
+检查点，会被 7 维校验拦下；`flexiv` 虽是 7 维，但那是 7 关节 Flexiv 臂，
+不是 UR5e 的 6 关节 + 夹爪。
 
 和旧入口 `run-vla-inference`（CloudRobo-VLA msgpack 协议）互不影响，两者可并存。
 
@@ -439,9 +442,16 @@ uv run ws-control \
   --max-steps 5
 ```
 
-⚠️ 现成的 pi05 检查点（huashu / flexiv / guodi / xinsong）输出的是**末端
-位姿**或多臂拼接动作（7 / 20 / 16 维），不是 UR5e 关节角，因此只能
-`--dry-run` 预览。不加 `--dry-run` 启动会在连接机器人之前报错。
+服务端返回的是**绝对关节角**（`response["actions"]`，`pi05_huashu` 为
+`(50, 7)`），不是末端位姿，所以和 `lingbot` 一样可以直接下发：去掉
+`--dry-run` 就会驱动 UR5e。OpenPI 已经在服务端完成反归一化和 Delta→ABS
+还原，客户端**不要**再把 state 加回去。
+
+动作宽度不是 7 时按普通 7 维校验失败处理：`guodi`（20 维）和 `xinsong`
+（16 维）是多臂 checkpoints，真机执行前会直接报错。`flexiv` 的 7 维对应
+7 关节 Flexiv 臂，形状检查能通过但语义不是 UR5e 的 6 关节 + 夹爪，不要
+在 UR5e 上执行它。首次上真机先 `--dry-run --max-steps 5` 确认
+`first=[...]` 里的关节值在 ±2π 内，再用 `--max-steps` 小步数试跑。
 
 ### 7.5 Flex-π（`--model flexpi`）
 
