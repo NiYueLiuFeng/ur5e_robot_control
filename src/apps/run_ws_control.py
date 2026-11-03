@@ -36,10 +36,10 @@ models) target a Flexiv arm and fail the same 7-dim check.
 Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
 pressing N or T moves the arm back to ``robot.reset_joints``. With
-``--save-video`` the merged third-person + wrist frames are buffered in memory
-and that reset first asks whether to encode and keep them; if the loop stops
-first (Ctrl+C or ``--max-steps``) the buffered episode is encoded on exit. For
-LingBot-VA an episode is also a server
+``--save-video`` the merged third-person + wrist frames are written to disk as
+they arrive, and that reset first asks whether to keep the episode file (``y``)
+or delete it (``N``); if the loop stops first (Ctrl+C or ``--max-steps``) the
+open file is kept on exit. For LingBot-VA an episode is also a server
 session: reset once, then keep the server's streaming KV cache up to date.
 """
 
@@ -1236,14 +1236,23 @@ def _handle_reset(
 
     if video is not None and not video.has_frames:
         # 一条 action 都没执行过（例如第一次推理还没返回就按了 T），
-        # 缓冲区是空的，没有东西可编码；明确提示，别让操作员以为录像丢了。
+        # 没有文件可保留；明确提示，别让操作员以为录像丢了。
         print("No episode video recorded: no action ran before this reset.")
+        # 顺手清掉上一段可能留下的失败状态（如编码器临时打不开），
+        # 否则 _failed 会让后续 episode 一直不再录像。
+        video.discard()
     if video is not None and video.has_frames:
-        # 缓冲的是每步观测：先记下 episode 结束时刻，问答耗时不进视频。
+        # 帧已经边录边写盘了：先记下 episode 结束时刻，问答耗时不进视频。
         end = time.monotonic()
         try:
             answer = input("Save the recorded episode video? [y/N] ").strip().lower()
         except EOFError:
+            # stdin 不是终端（nohup / 重定向 / IDE 运行）时输入读不到；
+            # 明确提示，别让操作员以为回答的 y 生效了。
+            print(
+                "WARNING: no answer read from stdin (not a terminal); "
+                "discarding this episode's video."
+            )
             answer = ""
         if answer in {"y", "yes"}:
             video.save(end=end)

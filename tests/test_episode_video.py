@@ -53,34 +53,50 @@ class EpisodeVideoRecorderTest(unittest.TestCase):
             second = recorder.save()
             self.assertEqual(second.name, "video_2.mp4")
 
-    def test_discard_drops_the_buffer_without_writing(self):
+    def test_discard_deletes_the_file_written_during_recording(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
         with tempfile.TemporaryDirectory() as root:
             recorder = EpisodeVideoRecorder(root=root, model="fastwam", fps=1000.0)
-            recorder.add(make_obs())
-            # 缓冲在内存里：按 N 之前不落盘，丢弃时也不会留下文件。
-            self.assertTrue(recorder.has_frames)
             self.assertFalse(list(Path(root).rglob("*.mp4")))
+
+            recorder.add(make_obs())
+
+            # 边录边写：第一帧就已经有了目录和文件，不等 save()。
+            self.assertTrue(recorder.has_frames)
+            self.assertEqual(len(list(Path(root).rglob("*.mp4"))), 1)
 
             recorder.discard()
 
             self.assertFalse(recorder.has_frames)
             self.assertFalse(list(Path(root).rglob("*.mp4")))
 
-    def test_writer_failure_disables_recording_without_raising(self):
+    def test_file_exists_before_save_so_a_crash_loses_only_the_tail(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
         with tempfile.TemporaryDirectory() as root:
             recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
             recorder.add(make_obs())
+
+            # 不调用 save()：文件必须已经在盘上。
+            files = list(Path(root).rglob("*.mp4"))
+            self.assertEqual(len(files), 1)
+            self.assertTrue(files[0].exists())
+
+    def test_writer_failure_disables_recording_without_raising(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
             with unittest.mock.patch(
                 "ur5e_control.runtime.episode_video._open_writer",
                 side_effect=RuntimeError("no encoder"),
             ):
+                # 编码器不可用时第一帧就要安静地关掉录像，不能抛异常。
+                recorder.add(make_obs())
+                self.assertFalse(recorder.has_frames)
                 self.assertIsNone(recorder.save())
 
-            self.assertFalse(recorder.has_frames)
             self.assertFalse(list(Path(root).rglob("*.mp4")))
 
     def test_gaps_are_filled_so_playback_matches_wall_clock(self):

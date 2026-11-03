@@ -1255,7 +1255,8 @@ class SaveVideoTest(unittest.TestCase):
             _handle_reset(env, np.zeros(7), empty)
 
         ask.assert_not_called()
-        self.assertEqual((empty.saved, empty.discarded), (0, 0))
+        # 没有帧时不保存，但会 discard 一次来清掉可能残留的失败状态。
+        self.assertEqual((empty.saved, empty.discarded), (0, 1))
 
 
 if __name__ == "__main__":

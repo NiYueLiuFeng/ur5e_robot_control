@@ -437,17 +437,17 @@ values, the six joints must lie within ±2π rad, and each joint may move at mos
 restarts the request cycle from the new pose.
 
 Add `--save-video true` to record the episode: each executed action appends a
-merged third-person + wrist frame to an in-memory buffer, and on an **N**/**T**
-reset the terminal asks `Save the recorded episode video? [y/N]`; only `y`
-encodes the buffered episode to
-`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`, anything else discards it
-before the arm re-homes. If the loop stops first (`Ctrl+C` or `--max-steps`), the
-buffered episode is encoded and kept on exit, so a run does not need an N/T reset
-to produce a video. Frames are paced to wall-clock time, so a slow inference step
-repeats the previous frame instead of compressing the video, and the last frame
-is held until the episode ends so the tail is not truncated. The buffer costs
-about 1.8 MB per frame at 1280x480 (~1.7 GB per minute at 15 fps), so save
-regularly on long runs. `--dry-run` never records.
+merged third-person + wrist frame to the video as it happens — the first frame
+creates `./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4` and later frames
+are written straight to it. On an **N**/**T** reset the terminal asks
+`Save the recorded episode video? [y/N]`; `y` keeps the file, anything else
+deletes it before the arm re-homes. If the loop stops first (`Ctrl+C` or
+`--max-steps`), the open file is finalized and kept, so a run does not need an
+N/T reset to produce a video and a crash loses only the tail. Frames are paced
+to wall-clock time, so a slow inference step repeats the previous frame instead
+of compressing the video, and the last frame is held until the episode ends so
+the tail is not truncated. Only the previous frame is held in memory, so long
+episodes do not grow the process. `--dry-run` never records.
 
 `--model` also selects one of the other delivery protocols:
 

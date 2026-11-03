@@ -254,21 +254,26 @@ uv run ws-control \
 ```
 
 - 每条 action 执行后取一帧，把第三人称（`third_left_top_rgb`）和腕部
-  （`wrist_rgb`）两路画面左右拼接，连同时间戳存进内存列表；录的过程中不写盘。
+  （`wrist_rgb`）两路画面左右拼接，**边录边写**到磁盘：第一帧就创建
+  `save_video/...` 目录并打开编码器，之后每帧直接追加；两次 action 之间
+  如果隔着推理等待，会重复上一帧补足真实时间。
 - 按 **N** / **T** 复位时，终端会询问
-  `Save the recorded episode video? [y/N]`：回答 `y` 才把内存里的整段 episode
-  编码成视频，其他（含直接回车）直接丢弃，然后机械臂才回初始位姿。下一段
-  episode 从空列表重新录制。
-- 视频按真实时间轴补帧：两次 action 之间如果隔着推理等待，会重复上一帧填满
-  这段时间，播放速度与现场一致，而不是"一条 action 一帧"的加速版本。
-- 最后一条 action 之后到停止（Ctrl+C / N/T）之间的等待也会用最后一帧补齐，
-  所以视频时长覆盖整个 episode，结尾不会被截断。
+  `Save the recorded episode video? [y/N]`：回答 `y` 保留已经录好的文件，
+  其他（含直接回车）删除该 episode 的文件，然后机械臂才回初始位姿。下一段
+  episode 会新建 `video_<num>.mp4` 从空文件重新录制。
+- 视频按真实时间轴补帧：播放速度与现场一致，而不是"一条 action 一帧"的
+  加速版本。最后一条 action 之后到停止（Ctrl+C / N/T）之间的等待也会用
+  最后一帧补齐，所以视频时长覆盖整个 episode，结尾不会被截断。
 - 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，目录按第一帧
-  的时间命名，同一分钟内按 `video_1.mp4`、`video_2.mp4` 递增。
-- 如果没按 N/T 就 `Ctrl+C` 或达到 `--max-steps`，退出时会把内存里的 episode
-  编码保存，不会因为直接退出而丢掉整段视频。
-- 内存占用约为 1280x480 每帧 1.8 MB，15 fps 下每分钟约 1.7 GB；超过 1 GiB 时
-  会打印一次提醒。长时间运行请定期按 N/T 保存。
+  的时间命名，同一分钟内按 `video_1.mp4`、`video_2.mp4` 递增。文件在
+  episode 开始时就已经存在，Ctrl+C / 崩溃最多丢掉最后几帧，不会整段丢失。
+- 如果没按 N/T 就 `Ctrl+C` 或达到 `--max-steps`，退出时会把正在录的文件补上
+  结尾并保留，不会因为直接退出而丢掉整段视频。
+- 内存里只保留上一帧用于补帧，长 episode 不会占满内存；录制期间磁盘占用会
+  持续增长。
+- 终端会打印 `Recording episode video: ...`（开始）、`Saved episode video: ...`
+  或 `Discarded episode video: ...`（结束）。如果 stdin 不是终端（`nohup`、
+  重定向、IDE 运行），会打印 WARNING 并丢弃本次视频。
 - `--dry-run` 下不录制（没有真实动作）。
 
 首次上真机建议：
