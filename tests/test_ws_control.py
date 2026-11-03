@@ -1166,12 +1166,14 @@ class FakeVideo:
         self.frames = []
         self.saved = 0
         self.discarded = 0
+        self.partial = False
 
     def add(self, obs):
         self.frames.append(obs)
 
-    def save(self, end=None):
+    def save(self, end=None, *, partial=False):
         self.saved += 1
+        self.partial = partial
 
     def discard(self):
         self.discarded += 1
@@ -1242,6 +1244,8 @@ class SaveVideoTest(unittest.TestCase):
         _finish_video(video)
 
         self.assertEqual((video.saved, video.discarded), (1, 0))
+        # 退出保存的文件要带 _partial 标记，和按 y 确认保存的 episode 区分开。
+        self.assertTrue(video.partial)
         # 没开录像时退出逻辑也不能报错。
         _finish_video(None)
 

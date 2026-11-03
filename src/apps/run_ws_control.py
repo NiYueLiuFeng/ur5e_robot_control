@@ -39,7 +39,8 @@ pressing N or T moves the arm back to ``robot.reset_joints``. With
 ``--save-video`` the merged third-person + wrist frames are written to disk as
 they arrive, and that reset first asks whether to keep the episode file (``y``)
 or delete it (``N``); if the loop stops first (Ctrl+C or ``--max-steps``) the
-open file is kept on exit. For LingBot-VA an episode is also a server
+open file is kept on exit as ``video_<n>_partial.mp4``. For LingBot-VA an
+episode is also a server
 session: reset once, then keep the server's streaming KV cache up to date.
 """
 
@@ -1221,10 +1222,15 @@ def _robot_command(
 
 
 def _finish_video(video: EpisodeVideoRecorder | None) -> None:
-    """Keep the recording that is still open when the control loop ends."""
+    """Keep the recording that is still open when the control loop ends.
+
+    The file is marked `video_<n>_partial.mp4`: it was not confirmed with `y`
+    at the N/T prompt, so it may be a tail segment rather than a whole
+    episode.
+    """
 
     if video is not None:
-        video.save()
+        video.save(partial=True)
 
 
 def _handle_reset(

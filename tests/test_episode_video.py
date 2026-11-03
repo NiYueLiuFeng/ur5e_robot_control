@@ -53,6 +53,25 @@ class EpisodeVideoRecorderTest(unittest.TestCase):
             second = recorder.save()
             self.assertEqual(second.name, "video_2.mp4")
 
+    def test_partial_save_renames_and_keeps_the_index_taken(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
+            recorder.add(make_obs())
+
+            path = recorder.save(partial=True)
+
+            # 退出时保留的录像用 _partial 后缀，避免当成操作员确认的 episode。
+            self.assertEqual(path.name, "video_1_partial.mp4")
+            self.assertTrue(path.exists())
+            self.assertFalse((path.parent / "video_1.mp4").exists())
+
+            # _partial 文件占用序号 1，下一段必须从 video_2 开始。
+            recorder.add(make_obs())
+            second = recorder.save()
+            self.assertEqual(second.name, "video_2.mp4")
+
     def test_discard_deletes_the_file_written_during_recording(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 

@@ -87,8 +87,14 @@ class EpisodeVideoRecorder:
         self._last_t = now
         self._frames += gap
 
-    def save(self, end: float | None = None) -> Path | None:
-        """Close the episode's file and return its path (None if empty)."""
+    def save(self, end: float | None = None, *, partial: bool = False) -> Path | None:
+        """Close the episode's file and return its path (None if empty).
+
+        ``partial`` marks a recording that was kept when the loop exited
+        without an explicit N/T confirmation (Ctrl+C / ``--max-steps`` /
+        error): the file is renamed to ``video_<n>_partial.mp4`` so it is not
+        mistaken for an episode the operator chose to keep.
+        """
 
         writer = self._writer
         path = self._path
@@ -105,7 +111,14 @@ class EpisodeVideoRecorder:
         frames = self._frames
         span = max(0.0, end_t - (self._start_t or end_t))
         self._reset()
-        print(f"Saved episode video: {path} ({frames} frames, {span:.1f} s)")
+        if partial:
+            path = _mark_partial(path)
+            print(
+                f"Saved partial episode video (kept on exit): {path} "
+                f"({frames} frames, {span:.1f} s)"
+            )
+        else:
+            print(f"Saved episode video: {path} ({frames} frames, {span:.1f} s)")
         return path
 
     def discard(self) -> None:
@@ -209,9 +222,29 @@ class EpisodeVideoRecorder:
         out_dir = self.root / self.model / stamp
         out_dir.mkdir(parents=True, exist_ok=True)
         index = 1
-        while (out_dir / f"video_{index}.mp4").exists():
+        # 退出时保存的文件已经改名成 video_<n>_partial.mp4，同样算占用这个序号，
+        # 否则下一段 episode 会重新用 video_<n>.mp4，看起来像两个 episode 重号。
+        while _episode_exists(out_dir, index):
             index += 1
         return out_dir / f"video_{index}.mp4"
+
+
+def _episode_exists(out_dir: Path, index: int) -> bool:
+    return (out_dir / f"video_{index}.mp4").exists() or (
+        out_dir / f"video_{index}_partial.mp4"
+    ).exists()
+
+
+def _mark_partial(path: Path) -> Path:
+    """Rename `video_<n>.mp4` to `video_<n>_partial.mp4`; fall back on failure."""
+
+    target = path.with_name(f"{path.stem}_partial{path.suffix}")
+    try:
+        path.rename(target)
+    except OSError as exc:
+        print(f"WARNING: could not rename {path} to {target}: {exc}")
+        return path
+    return target
 
 
 def merge_views(third_person: Any, wrist: Any) -> np.ndarray:

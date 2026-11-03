@@ -442,8 +442,10 @@ creates `./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4` and later frames
 are written straight to it. On an **N**/**T** reset the terminal asks
 `Save the recorded episode video? [y/N]`; `y` keeps the file, anything else
 deletes it before the arm re-homes. If the loop stops first (`Ctrl+C` or
-`--max-steps`), the open file is finalized and kept, so a run does not need an
-N/T reset to produce a video and a crash loses only the tail. Frames are paced
+`--max-steps`), the open file is finalized and kept as
+`video_<num>_partial.mp4`, so a run does not need an N/T reset to produce a
+video, a crash loses only the tail, and an unconfirmed segment is not mistaken
+for a whole episode. Frames are paced
 to wall-clock time, so a slow inference step repeats the previous frame instead
 of compressing the video, and the last frame is held until the episode ends so
 the tail is not truncated. Only the previous frame is held in memory, so long

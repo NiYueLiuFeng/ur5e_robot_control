@@ -426,8 +426,8 @@ PYTHONPATH=src python -m apps.run_ws_control \
 `./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，后续帧直接追加；按
 **N**/**T** 复位时终端询问 `Save the recorded episode video? [y/N]`，回答 `y`
 保留文件，其余回答在回位前删除该文件。如果先按 `Ctrl+C` 或达到 `--max-steps`
-退出，正在录的文件会补齐结尾并保留，不按 N/T 也能拿到视频，崩溃最多丢最后
-几帧。视频按真实时间轴补帧，推理等待期间重复上一帧；停止前的等待也会用最后
+退出，正在录的文件会补齐结尾并保留为 `video_<num>_partial.mp4`（没有经过 `y`
+确认，可能只是半截 episode），不按 N/T 也能拿到视频，崩溃最多丢最后几帧。视频按真实时间轴补帧，推理等待期间重复上一帧；停止前的等待也会用最后
 一帧补齐，结尾不会被截断。内存里只保留上一帧，长 episode 不会涨内存；
 `--dry-run` 下不录制。
 

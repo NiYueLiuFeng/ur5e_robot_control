@@ -268,7 +268,9 @@ uv run ws-control \
   的时间命名，同一分钟内按 `video_1.mp4`、`video_2.mp4` 递增。文件在
   episode 开始时就已经存在，Ctrl+C / 崩溃最多丢掉最后几帧，不会整段丢失。
 - 如果没按 N/T 就 `Ctrl+C` 或达到 `--max-steps`，退出时会把正在录的文件补上
-  结尾并保留，不会因为直接退出而丢掉整段视频。
+  结尾并保留，文件名加 `_partial` 后缀（`video_<num>_partial.mp4`），表示
+  这段没有经过 `y` 确认，可能只是半截 episode。`_partial` 文件同样占用序号，
+  下一段会从下一个编号开始。
 - 内存里只保留上一帧用于补帧，长 episode 不会占满内存；录制期间磁盘占用会
   持续增长。
 - 终端会打印 `Recording episode video: ...`（开始）、`Saved episode video: ...`
