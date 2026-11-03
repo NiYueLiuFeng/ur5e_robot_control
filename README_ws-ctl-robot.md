@@ -258,14 +258,17 @@ uv run ws-control \
   `save_video/...` 目录并打开编码器，之后每帧直接追加；两次 action 之间
   如果隔着推理等待，会重复上一帧补足真实时间。
 - 按 **N** / **T** 复位时，终端会询问
-  `Save the recorded episode video? [y/N]`：回答 `y` 保留已经录好的文件，
-  其他（含直接回车）删除该 episode 的文件，然后机械臂才回初始位姿。下一段
+  `Save the recorded episode video? [Y/n]`：**默认保留**——只有明确回答 `n`
+  才删除该 episode 的文件；回答 `y` 正常保留；直接回车或无法识别的回答
+  （包括 stdin 读不到）也保留，但因为没确认过，会加 `_partial` 后缀。随后
+  机械臂才回初始位姿。下一段
   episode 会新建 `video_<num>.mp4` 从空文件重新录制。
 - 视频按真实时间轴补帧：播放速度与现场一致，而不是"一条 action 一帧"的
   加速版本。最后一条 action 之后到停止（Ctrl+C / N/T）之间的等待也会用
   最后一帧补齐，所以视频时长覆盖整个 episode，结尾不会被截断。
-- 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，目录按第一帧
-  的时间命名，同一分钟内按 `video_1.mp4`、`video_2.mp4` 递增。文件在
+- 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`。目录按
+  **ws-control 启动时间**命名，同一个进程的所有 episode 都写进这个目录，按
+  `video_1.mp4`、`video_2.mp4` 递增，不会因为跨了分钟就散到新目录。文件在
   episode 开始时就已经存在，Ctrl+C / 崩溃最多丢掉最后几帧，不会整段丢失。
 - 如果没按 N/T 就 `Ctrl+C` 或达到 `--max-steps`，退出时会把正在录的文件补上
   结尾并保留，文件名加 `_partial` 后缀（`video_<num>_partial.mp4`），表示
@@ -274,8 +277,9 @@ uv run ws-control \
 - 内存里只保留上一帧用于补帧，长 episode 不会占满内存；录制期间磁盘占用会
   持续增长。
 - 终端会打印 `Recording episode video: ...`（开始）、`Saved episode video: ...`
-  或 `Discarded episode video: ...`（结束）。如果 stdin 不是终端（`nohup`、
-  重定向、IDE 运行），会打印 WARNING 并丢弃本次视频。
+  / `Saved partial episode video: ...` / `Discarded episode video: ...`（结束）。
+  如果 stdin 不是终端（`nohup`、重定向、IDE 运行），会打印 WARNING，并按
+  默认策略保留为 `_partial`。
 - `--dry-run` 下不录制（没有真实动作）。
 
 首次上真机建议：

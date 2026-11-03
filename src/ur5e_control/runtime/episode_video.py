@@ -13,14 +13,17 @@ MAX_GAP_S = 120.0
 
 
 class EpisodeVideoRecorder:
-    """Stream one episode to `save_video/<model>/<time>/video_<n>.mp4`.
+    """Stream episodes to `save_video/<model>/<session start>/video_<n>.mp4`.
 
-    The first `add()` of an episode creates the directory, opens the encoder
-    and writes that frame, so the file exists from the beginning of the
-    episode. Every later `add()` writes the merged frame straight to disk
-    (repeating the previous one to fill the wall-clock gap). `save()` only
-    closes the file and keeps it; `discard()` closes and deletes it. A crash
-    or Ctrl+C therefore loses at most the tail instead of the whole episode.
+    The directory is named once when the recorder is built (the ws-control
+    session start) and every episode of that process writes into it, numbered
+    `video_1.mp4`, `video_2.mp4`, ... The first `add()` of an episode creates
+    the directory, opens the encoder and writes that frame, so the file exists
+    from the beginning of the episode. Every later `add()` writes the merged
+    frame straight to disk (repeating the previous one to fill the wall-clock
+    gap). `save()` only closes the file and keeps it; `discard()` closes and
+    deletes it. A crash or Ctrl+C therefore loses at most the tail instead of
+    the whole episode.
 
     Only the previous frame is held in memory so gaps can be filled, which
     keeps a long episode at constant memory instead of ~1.8 MB per frame
@@ -39,6 +42,9 @@ class EpisodeVideoRecorder:
         self.model = model
         # 与 _open_writer 的时基限制一致，补帧间隔才能和实际编码帧率对上。
         self.fps = min(max(float(fps), 1.0), 240.0)
+        # 会话目录在进程启动时定下来：多个 episode 都写进同一个目录，
+        # 而不是按各自开始的时间散落到不同分钟的目录里。
+        self._stamp = time.strftime("%Y%m%d-%H:%M")
         self._writer: Any | None = None
         self._path: Path | None = None
         self._frames = 0
@@ -47,7 +53,6 @@ class EpisodeVideoRecorder:
         # 只保留上一帧：两次 action 之间隔着的推理等待用它补帧。
         self._previous: np.ndarray | None = None
         self._size: tuple[int, int] | None = None
-        self._stamp: str | None = None
         self._failed = False
         self._warned_size = False
 
@@ -71,9 +76,6 @@ class EpisodeVideoRecorder:
             return
         # cv2 的编码器按 BGR 处理，相机给的是 RGB。
         bgr = np.ascontiguousarray(frame[:, :, ::-1])
-        if self._stamp is None:
-            # 目录用第一帧的时间命名，而不是保存时的时间。
-            self._stamp = time.strftime("%Y%m%d-%H:%M")
         if self._writer is None:
             self._open(bgr, now)
             return
@@ -90,10 +92,11 @@ class EpisodeVideoRecorder:
     def save(self, end: float | None = None, *, partial: bool = False) -> Path | None:
         """Close the episode's file and return its path (None if empty).
 
-        ``partial`` marks a recording that was kept when the loop exited
-        without an explicit N/T confirmation (Ctrl+C / ``--max-steps`` /
-        error): the file is renamed to ``video_<n>_partial.mp4`` so it is not
-        mistaken for an episode the operator chose to keep.
+        ``partial`` marks a recording that was not explicitly confirmed by the
+        operator (Ctrl+C / ``--max-steps`` / error at exit, or an unanswered /
+        unrecognized N/T prompt): the file is renamed to
+        ``video_<n>_partial.mp4`` so it is not mistaken for an episode the
+        operator chose to keep.
         """
 
         writer = self._writer
@@ -114,7 +117,7 @@ class EpisodeVideoRecorder:
         if partial:
             path = _mark_partial(path)
             print(
-                f"Saved partial episode video (kept on exit): {path} "
+                f"Saved partial episode video (not explicitly confirmed): {path} "
                 f"({frames} frames, {span:.1f} s)"
             )
         else:
@@ -212,14 +215,13 @@ class EpisodeVideoRecorder:
         self._last_t = None
         self._previous = None
         self._size = None
-        self._stamp = None
+        # 注意：不清 _stamp —— 会话目录在整个 ws-control 进程内保持不变。
         self._warned_size = False
         # 下一段 episode 重新尝试一次，临时故障（如磁盘满）可以恢复。
         self._failed = False
 
     def _next_path(self) -> Path:
-        stamp = self._stamp or time.strftime("%Y%m%d-%H:%M")
-        out_dir = self.root / self.model / stamp
+        out_dir = self.root / self.model / self._stamp
         out_dir.mkdir(parents=True, exist_ok=True)
         index = 1
         # 退出时保存的文件已经改名成 video_<n>_partial.mp4，同样算占用这个序号，

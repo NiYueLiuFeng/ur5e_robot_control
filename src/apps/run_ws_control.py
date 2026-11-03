@@ -37,9 +37,11 @@ Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
 pressing N or T moves the arm back to ``robot.reset_joints``. With
 ``--save-video`` the merged third-person + wrist frames are written to disk as
-they arrive, and that reset first asks whether to keep the episode file (``y``)
-or delete it (``N``); if the loop stops first (Ctrl+C or ``--max-steps``) the
-open file is kept on exit as ``video_<n>_partial.mp4``. For LingBot-VA an
+they arrive, and that reset first asks whether to keep the episode file: the
+default is to keep it, only an explicit ``n`` deletes it, and an unanswered or
+unrecognized answer keeps it as ``video_<n>_partial.mp4``. If the loop stops
+first (Ctrl+C or ``--max-steps``) the open file is likewise kept as
+``video_<n>_partial.mp4``. For LingBot-VA an
 episode is also a server
 session: reset once, then keep the server's streaming KV cache up to date.
 """
@@ -1225,8 +1227,8 @@ def _finish_video(video: EpisodeVideoRecorder | None) -> None:
     """Keep the recording that is still open when the control loop ends.
 
     The file is marked `video_<n>_partial.mp4`: it was not confirmed with `y`
-    at the N/T prompt, so it may be a tail segment rather than a whole
-    episode.
+    at the N/T prompt (the loop stopped first), so it may be a tail segment
+    rather than a whole episode.
     """
 
     if video is not None:
@@ -1251,19 +1253,24 @@ def _handle_reset(
         # 帧已经边录边写盘了：先记下 episode 结束时刻，问答耗时不进视频。
         end = time.monotonic()
         try:
-            answer = input("Save the recorded episode video? [y/N] ").strip().lower()
+            answer = input("Save the recorded episode video? [Y/n] ").strip().lower()
         except EOFError:
             # stdin 不是终端（nohup / 重定向 / IDE 运行）时输入读不到；
-            # 明确提示，别让操作员以为回答的 y 生效了。
+            # 默认保留，否则一次误判就会删掉整段录像。
             print(
                 "WARNING: no answer read from stdin (not a terminal); "
-                "discarding this episode's video."
+                "keeping this episode's video as _partial."
             )
             answer = ""
-        if answer in {"y", "yes"}:
+        if answer in {"n", "no"}:
+            # 只有明确回答 n 才删除。
+            video.discard()
+        elif answer in {"y", "yes"}:
             video.save(end=end)
         else:
-            video.discard()
+            # 直接回车 / 无法识别的回答（含读不到输入）：默认保留，
+            # 但用 _partial 标记，表示操作员没有明确确认过这段录像。
+            video.save(end=end, partial=True)
     _reset_to_start(env, reset_joints)
 
 

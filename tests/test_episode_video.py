@@ -53,6 +53,27 @@ class EpisodeVideoRecorderTest(unittest.TestCase):
             second = recorder.save()
             self.assertEqual(second.name, "video_2.mp4")
 
+    def test_all_episodes_share_the_session_directory(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            with unittest.mock.patch(
+                "ur5e_control.runtime.episode_video.time.strftime",
+                return_value="20260101-09:00",
+            ):
+                recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
+
+            # 后续 episode 即使跨了分钟，也写进进程启动时定下的同一个目录。
+            # （如果代码仍然在每段开始时取时间，目录名会是真实时间而不是这里。）
+            recorder.add(make_obs())
+            first = recorder.save()
+            recorder.add(make_obs())
+            second = recorder.save()
+
+            self.assertEqual(first.parent.name, "20260101-09:00")
+            self.assertEqual(second.parent, first.parent)
+            self.assertEqual((first.name, second.name), ("video_1.mp4", "video_2.mp4"))
+
     def test_partial_save_renames_and_keeps_the_index_taken(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 

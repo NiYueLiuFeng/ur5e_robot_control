@@ -1227,6 +1227,7 @@ class SaveVideoTest(unittest.TestCase):
             _handle_reset(env, np.zeros(7), kept)
 
         self.assertEqual((kept.saved, kept.discarded), (1, 0))
+        self.assertFalse(kept.partial)
         # 复位仍然执行：100 步插值。
         self.assertEqual(len(env.commands), 100)
 
@@ -1235,7 +1236,29 @@ class SaveVideoTest(unittest.TestCase):
         with unittest.mock.patch("builtins.input", return_value="n"):
             _handle_reset(env, np.zeros(7), dropped)
 
+        # 只有明确回答 n 才删除。
         self.assertEqual((dropped.saved, dropped.discarded), (0, 1))
+
+    def test_reset_keeps_the_video_by_default(self):
+        from apps.run_ws_control import _handle_reset
+
+        # 直接回车：默认保留，因为没有明确确认过，标成 _partial。
+        env = FakeEnv({"joint_positions": np.zeros(7)})
+        defaulted = FakeVideo(frames=[object()])
+        with unittest.mock.patch("builtins.input", return_value=""):
+            _handle_reset(env, np.zeros(7), defaulted)
+
+        self.assertEqual((defaulted.saved, defaulted.discarded), (1, 0))
+        self.assertTrue(defaulted.partial)
+
+        # 读不到输入（stdin 不是终端）：同样保留，不能误删一段录像。
+        env = FakeEnv({"joint_positions": np.zeros(7)})
+        no_stdin = FakeVideo(frames=[object()])
+        with unittest.mock.patch("builtins.input", side_effect=EOFError):
+            _handle_reset(env, np.zeros(7), no_stdin)
+
+        self.assertEqual((no_stdin.saved, no_stdin.discarded), (1, 0))
+        self.assertTrue(no_stdin.partial)
 
     def test_exit_keeps_the_open_recording(self):
         from apps.run_ws_control import _finish_video

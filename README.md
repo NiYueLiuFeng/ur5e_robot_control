@@ -437,11 +437,16 @@ values, the six joints must lie within ±2π rad, and each joint may move at mos
 restarts the request cycle from the new pose.
 
 Add `--save-video true` to record the episode: each executed action appends a
-merged third-person + wrist frame to the video as it happens — the first frame
-creates `./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4` and later frames
-are written straight to it. On an **N**/**T** reset the terminal asks
-`Save the recorded episode video? [y/N]`; `y` keeps the file, anything else
-deletes it before the arm re-homes. If the loop stops first (`Ctrl+C` or
+merged third-person + wrist frame to the video as it happens. The directory is
+named after the ws-control start time, every episode of that process writes
+into it as `video_<num>.mp4` (the first frame of an episode creates the file,
+later frames are written straight to it). On an **N**/**T** reset the terminal
+asks
+`Save the recorded episode video? [Y/n]`; only an explicit `n` deletes the
+file before the arm re-homes, while `y` and a bare Enter both keep it (an
+empty or unrecognized answer, including an unreadable stdin, is saved as
+`video_<num>_partial.mp4` because it was not confirmed). If the
+loop stops first (`Ctrl+C` or
 `--max-steps`), the open file is finalized and kept as
 `video_<num>_partial.mp4`, so a run does not need an N/T reset to produce a
 video, a crash loses only the tail, and an unconfirmed segment is not mistaken
