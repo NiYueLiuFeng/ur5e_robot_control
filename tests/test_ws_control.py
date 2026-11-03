@@ -429,13 +429,11 @@ class OpenPI05ProtocolTest(unittest.TestCase):
         self.assertEqual(executed, 1)
         self.assertEqual(env.commands, [])
 
-    def test_eef_model_refuses_to_drive_the_robot(self):
+    def test_joint_models_can_drive_the_robot(self):
         from apps.run_ws_control import _ensure_executable
 
-        with self.assertRaisesRegex(ValueError, "absolute 6-joint"):
-            _ensure_executable("flexpi", dry_run=False)
-        _ensure_executable("flexpi", dry_run=True)
-        # pi05 交付的是绝对关节角，可以直接驱动 UR5e。
+        # Flex-π 的 ur5e 变体、pi05 和 fastwam 都交付绝对关节角。
+        _ensure_executable("flexpi", dry_run=False)
         _ensure_executable("pi05", dry_run=False)
         _ensure_executable("fastwam", dry_run=False)
 
@@ -479,6 +477,106 @@ class OpenPI05ProtocolTest(unittest.TestCase):
         self.assertEqual(env.commands[1][-1], 0.0)
 
 
+class FlexPiProtocolTest(unittest.TestCase):
+    def test_request_uses_ur5e_joint_state_and_tcp_pose(self):
+        from apps.run_ws_control import get_model_body
+
+        obs = {
+            "joint_positions": np.array([2, -1.5, 1.6, -1.5, -1.5, 0.1, 1], dtype=float),
+            "tcp_pose": np.arange(6, dtype=float),
+            "third_left_top_rgb": np.zeros((8, 8, 3), dtype=np.uint8),
+            "wrist_rgb": np.full((8, 8, 3), 255, dtype=np.uint8),
+        }
+
+        body = get_model_body(obs, model="flexpi", task="pick the pen")
+
+        self.assertEqual(body["prompt"], "pick the pen")
+        np.testing.assert_allclose(
+            np.asarray(body["state"]), [2, -1.5, 1.6, -1.5, -1.5, 0.1, 1]
+        )
+        np.testing.assert_allclose(np.asarray(body["tcp_pose"]), np.arange(6))
+        self.assertEqual(set(body["images"]), {"cam_high", "cam_left_wrist"})
+
+    def test_state_rejects_the_old_13_dim_hs13_vector(self):
+        from apps.run_ws_control import _flexpi_state
+
+        with self.assertRaisesRegex(ValueError, "7 values"):
+            _flexpi_state({"joint_positions": np.zeros(13)})
+
+    def test_request_round_trips_ndarray_body(self):
+        from apps.run_ws_control import _request
+
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
+        body = {
+            "state": np.arange(7, dtype=np.float32),
+            "tcp_pose": np.arange(6, dtype=np.float32),
+            "images": {"cam_high": np.zeros((3, 4, 4), dtype=np.uint8)},
+            "prompt": "pick",
+        }
+        actions = np.array([[0.1] * 6 + [0.9]], dtype=np.float32)
+        connection = FakeConnection(
+            [msgpack.packb({"actions": server_array(actions)}, use_bin_type=True)]
+        )
+
+        response = _request(connection, body, model="flexpi")
+
+        sent = msgpack.unpackb(connection.sent[0], raw=False, strict_map_key=False)
+        self.assertTrue(sent["state"][b"__ndarray__"])
+        self.assertTrue(sent["tcp_pose"][b"__ndarray__"])
+        self.assertTrue(sent["images"]["cam_high"][b"__ndarray__"])
+        np.testing.assert_allclose(response["actions"], actions)
+
+    def test_joint_actions_drive_the_robot(self):
+        from apps.run_ws_control import _run
+
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
+        actions = np.array(
+            [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]], dtype=np.float32
+        )
+        connection = FakeConnection(
+            [msgpack.packb({"actions": server_array(actions)}, use_bin_type=True)]
+        )
+        env = FakeEnv(
+            {
+                "joint_positions": np.zeros(7),
+                "tcp_pose": np.zeros(6),
+                "third_left_top_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+                "wrist_rgb": np.zeros((4, 4, 3), dtype=np.uint8),
+            }
+        )
+
+        executed = _run(
+            env,
+            connection,
+            model="flexpi",
+            vla=make_vla(),
+            task="pick",
+            max_steps=2,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(env.commands), 2)
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
+
+
 class LingBotProtocolTest(unittest.TestCase):
     def setUp(self):
         if msgpack_numpy is None:
@@ -504,7 +602,7 @@ class LingBotProtocolTest(unittest.TestCase):
         self.assertEqual(body["prompt"], "plug the charger")
 
     def test_prepare_server_consumes_metadata_and_resets(self):
-        from apps.run_ws_control import _prepare_server, _unpack_numpy
+        from apps.run_ws_control import _prepare_server, _unpack_ndarray
 
         connection = FakeConnection(
             [
@@ -517,7 +615,7 @@ class LingBotProtocolTest(unittest.TestCase):
 
         self.assertEqual(len(connection.sent), 1)
         self.assertEqual(
-            _unpack_numpy(connection.sent[0]),
+            _unpack_ndarray(connection.sent[0]),
             {"reset": True, "prompt": "plug"},
         )
 
@@ -1072,7 +1170,7 @@ class FakeVideo:
     def add(self, obs):
         self.frames.append(obs)
 
-    def save(self):
+    def save(self, end=None):
         self.saved += 1
 
     def discard(self):
@@ -1136,6 +1234,16 @@ class SaveVideoTest(unittest.TestCase):
             _handle_reset(env, np.zeros(7), dropped)
 
         self.assertEqual((dropped.saved, dropped.discarded), (0, 1))
+
+    def test_exit_keeps_the_open_recording(self):
+        from apps.run_ws_control import _finish_video
+
+        video = FakeVideo(frames=[object()])
+        _finish_video(video)
+
+        self.assertEqual((video.saved, video.discarded), (1, 0))
+        # 没开录像时退出逻辑也不能报错。
+        _finish_video(None)
 
     def test_reset_without_frames_does_not_prompt(self):
         from apps.run_ws_control import _handle_reset

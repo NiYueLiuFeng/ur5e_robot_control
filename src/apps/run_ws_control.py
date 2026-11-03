@@ -15,7 +15,8 @@
   needs a ``ping`` / ``reset`` handshake before the first ``obs``.
 - ``pi05`` (alias ``openpi05``): OpenPI 0.5 msgpack frames using the server's
   ``__ndarray__`` array encoding.
-- ``flexpi``: Flex-π msgpack-numpy frames with the 13-dim HS13 state.
+- ``flexpi``: Flex-π msgpack frames using the server's ``__ndarray__`` array
+  encoding, with the 7-dim UR5e joint state and the 6-dim ``tcp_pose``.
 
 Execution contract: the UR5e accepts absolute 6-joint + gripper commands, so
 only 7-value joint actions are sent to the robot. Every action is validated
@@ -25,17 +26,20 @@ returns absolute joint angles, so it drives the arm directly: FastWAM
 ``autogen_mixed_ur5``, LingBot-VA ``ur5``, OpenWAM ``ur5`` and OpenPI
 ``pi05`` (``pi05_huashu`` delivers ``(50, 7)`` absolute joints; the server
 already undoes normalization and delta->ABS, so the client must not add the
-state back). Non-UR5e ``pi05`` configs must not be executed: ``guodi``
-(20-dim) and ``xinsong`` (16-dim) fail the 7-dim check, and ``flexiv`` is a
-7-DOF arm whose 7 values are not a UR5e 6-joint + gripper command. ``flexpi``
-targets a Flexiv arm and delivers the 13-dim HS13 end-effector state, so it
-can only run in preview mode (``--dry-run``).
+state back) and Flex-π ``ur5e`` (7-dim joint state plus the required 6-dim
+``tcp_pose``, and ``(32, 7)`` absolute joint actions). Non-UR5e ``pi05``
+configs must not be executed: ``guodi`` (20-dim) and ``xinsong`` (16-dim) fail
+the 7-dim check, and ``flexiv`` is a 7-DOF arm whose 7 values are not a UR5e
+6-joint + gripper command. Non-UR5e Flex-π checkpoints (the 13-dim HS13
+models) target a Flexiv arm and fail the same 7-dim check.
 
 Each loop: read cameras + state -> send one request -> receive one action
 chunk -> validate and execute (or preview) the actions. While the loop runs,
 pressing N or T moves the arm back to ``robot.reset_joints``. With
-``--save-video`` that reset first asks whether to keep the episode's merged
-third-person + wrist recording. For LingBot-VA an episode is also a server
+``--save-video`` the merged third-person + wrist frames are buffered in memory
+and that reset first asks whether to encode and keep them; if the loop stops
+first (Ctrl+C or ``--max-steps``) the buffered episode is encoded on exit. For
+LingBot-VA an episode is also a server
 session: reset once, then keep the server's streaming KV cache up to date.
 """
 
@@ -129,7 +133,7 @@ MODEL_SPECS = {
     "lingbot": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "openwam": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "pi05": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
-    "flexpi": ModelSpec("eef", 15.0, "13 维 HS13 绝对末端状态"),
+    "flexpi": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
 }
 # 按这些键时让机械臂回到 robot.reset_joints（复位）。
 RESET_KEYS = ("n", "t")
@@ -235,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_str2bool,
         metavar="BOOL",
         help="Record one episode's merged third-person + wrist video and ask "
-        "whether to keep it when N/T resets the arm.",
+        "whether to keep it (y) or discard it (N) when N/T resets the arm.",
     )
     parser.add_argument(
         "--no-streaming",
@@ -335,9 +339,9 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("Stopping UR5e policy control.")
     finally:
-        # 未按 y 保存的录像在退出时删除，避免留下半截 mp4。
-        if video is not None:
-            video.discard()
+        # Ctrl+C / --max-steps 退出时把还没确认的录像落盘，避免整段录到一半
+        # 什么都没有；只有按 N/T 时明确回答非 y 才会丢弃。
+        _finish_video(video)
         # 正常结束、报错或 Ctrl+C 都要断开连接并释放机器人/相机进程。
         connection.close()
         bundle.close()
@@ -575,7 +579,7 @@ def get_model_body(
     state = np.asarray(obs["joint_positions"], dtype=float).reshape(-1).tolist()
 
     if model == "pi05":
-        # OpenPI 0.5 直接收发 numpy 数组（走 msgpack-numpy），不走 JPEG。
+        # OpenPI 0.5 直接收发 numpy 数组（走 `__ndarray__`），不走 JPEG。
         # 字段名里的点号是字典键名本身，不能改成嵌套对象。
         body = {
             "observation.state": np.asarray(
@@ -593,9 +597,11 @@ def get_model_body(
         return {"obs": _lingbot_images(obs), "prompt": task}
 
     if model == "flexpi":
-        # Flex-π 需要 13 维 HS13 状态（位置、姿态、夹爪宽度、力、力矩）。
+        # Flex-π 的 UR5e 变体：state 是 6 关节角 + 归一化夹爪，另外必须带
+        # 训练同坐标系的 6 维 tcp_pose（xyz + 旋转向量，不是欧拉角）。
         return {
             "state": _flexpi_state(obs),
+            "tcp_pose": _flexpi_tcp_pose(obs),
             "images": {
                 name: _to_hwc_uint8(obs[obs_key])
                 for name, obs_key in FLEXPI_IMAGE_FIELDS.items()
@@ -668,23 +674,31 @@ def _to_hwc_uint8(image: Any) -> np.ndarray:
 
 
 def _flexpi_state(obs: dict[str, Any]) -> np.ndarray:
-    """Assemble the 13-dim HS13 state Flex-π expects (preview only).
+    """Return the 7-dim UR5e state Flex-π expects.
 
-    HS13 is `[pos xyz, rot abc, gripper width, force xyz, torque xy/yz/zx]`.
-    The UR5e exposes the pose as an axis-angle TCP pose and the gripper as a
-    0..1000 PGC position, so this vector is only representative: the returned
-    Flex-π actions target a Flexiv arm and are never sent to the UR5e.
+    The UR5e profile trains on ``observation.state`` =
+    ``[q1..q6, gripper]``: six joint angles in native radians plus the
+    binarized gripper (0 closed / 1 open), exactly what
+    ``RobotEnv.get_obs()["joint_positions"]`` already contains. The older
+    13-dim HS13 checkpoints consumed an end-effector state for a Flexiv arm.
     """
 
-    tcp_pose = np.asarray(obs["tcp_pose"], dtype=float).reshape(-1)
-    gripper = np.asarray(obs["gripper_position_raw"], dtype=float).reshape(-1)
-    tcp_force = np.asarray(obs["tcp_force"], dtype=float).reshape(-1)
-    if tcp_pose.size != 6 or tcp_force.size != 6 or gripper.size != 1:
+    state = np.asarray(obs["joint_positions"], dtype=np.float32).reshape(-1)
+    if state.size != ACTION_DIM:
         raise ValueError(
-            "Flex-π state needs a 6-value tcp_pose, 6-value tcp_force and "
-            "one gripper_position_raw value"
+            f"Flex-π state must contain {ACTION_DIM} values "
+            f"(6 joints + gripper), got {state.size}"
         )
-    return np.concatenate([tcp_pose, gripper, tcp_force]).astype(np.float32)
+    return state
+
+
+def _flexpi_tcp_pose(obs: dict[str, Any]) -> np.ndarray:
+    """Return the 6-dim ``tcp_pose`` Flex-π requires: xyz + rotation vector."""
+
+    tcp_pose = np.asarray(obs["tcp_pose"], dtype=np.float32).reshape(-1)
+    if tcp_pose.size != 6:
+        raise ValueError(f"Flex-π tcp_pose must contain 6 values, got {tcp_pose.size}")
+    return tcp_pose
 
 
 def _request(connection: Any, body: dict[str, Any], *, model: str) -> dict[str, Any]:
@@ -692,16 +706,12 @@ def _request(connection: Any, body: dict[str, Any], *, model: str) -> dict[str, 
 
     model = _normalize_model(model)
 
-    if model in {"lingbot", "pi05"}:
-        # 这两类服务端都用纯 msgpack 收包，数组走它们自己的 `__ndarray__` 帧，
-        # 不是 msgpack-numpy；发 msgpack-numpy 数组时服务端会把它当成普通 dict。
+    if model in {"lingbot", "pi05", "flexpi"}:
+        # 这些服务端都用纯 msgpack 收包，数组走它们自己的 `__ndarray__` 帧，
+        # 不是 msgpack-numpy；发 msgpack-numpy 数组时服务端会把它当成普通 dict，
+        # 随后 float(dict) 报 "float() argument must be ... not 'dict'"。
         connection.send(_pack_ndarray(body))
         return _unpack_ndarray(connection.recv())
-
-    if model == "flexpi":
-        # Flex-π 直接序列化 numpy 数组，需要 msgpack-numpy 编解码。
-        connection.send(_pack_numpy(body))
-        return _unpack_numpy(connection.recv())
 
     if model == "fastwam":
         connection.send(_pack(body))
@@ -775,7 +785,8 @@ def _prepare_server(connection: Any, *, model: str, task: str) -> None:
         return
 
     if model == "flexpi":
-        metadata = _unpack_numpy(connection.recv())
+        # 与 lingbot/pi05 相同，metadata 也走服务端的 `__ndarray__` 编码。
+        metadata = _unpack_ndarray(connection.recv())
         print(f"{model} server metadata: {metadata}")
 
 
@@ -989,7 +1000,10 @@ def _check_action_shape(
             "arm and guodi/xinsong are multi-arm)"
         )
     elif model == "flexpi":
-        hint = " (Flex-π returns the 13-dim HS13 state)"
+        hint = (
+            " (load the Flex-π ur5e checkpoint; the 13-dim HS13 model is for a "
+            "Flexiv arm)"
+        )
     message = (
         f"{model}: expected {ACTION_DIM}-dim single-arm UR5 actions "
         f"(6 joints + gripper), got {actions.shape[1]}{hint}"
@@ -1010,8 +1024,9 @@ def _ensure_executable(model: str, *, dry_run: bool) -> None:
     raise ValueError(
         f"model {model!r} returns {spec.note}, but the UR5e executes only "
         "absolute 6-joint + gripper commands. Use a UR5 checkpoint (FastWAM "
-        "autogen_mixed_ur5, LingBot-VA ur5, OpenWAM ur5, OpenPI pi05_huashu) "
-        "or pass --dry-run to inspect the actions without moving the robot."
+        "autogen_mixed_ur5, LingBot-VA ur5, OpenWAM ur5, OpenPI pi05_huashu, "
+        "Flex-π ur5e) or pass --dry-run to inspect the actions without moving "
+        "the robot."
     )
 
 
@@ -1106,23 +1121,6 @@ def _decode_ndarray(obj: dict[Any, Any]) -> Any:
     if isinstance(dtype, bytes):
         dtype = dtype.decode()
     return np.frombuffer(field("data"), dtype=np.dtype(dtype)).reshape(shape)
-
-
-def _pack_numpy(frame: dict[str, Any]) -> bytes:
-    import msgpack_numpy
-
-    return msgpack_numpy.packb(frame, use_bin_type=True)
-
-
-def _unpack_numpy(data: Any) -> dict[str, Any]:
-    import msgpack_numpy
-
-    if isinstance(data, str):
-        raise RuntimeError(f"policy server returned text: {data}")
-    frame = msgpack_numpy.unpackb(data, raw=False, strict_map_key=False)
-    if not isinstance(frame, dict):
-        raise RuntimeError(f"policy server returned {type(frame).__name__}")
-    return frame
 
 
 def _send_json(connection: Any, frame: dict[str, Any]) -> None:
@@ -1222,6 +1220,13 @@ def _robot_command(
     return command
 
 
+def _finish_video(video: EpisodeVideoRecorder | None) -> None:
+    """Keep the recording that is still open when the control loop ends."""
+
+    if video is not None:
+        video.save()
+
+
 def _handle_reset(
     env: Any,
     reset_joints: Any,
@@ -1229,13 +1234,19 @@ def _handle_reset(
 ) -> None:
     """Ask whether to keep the recorded episode, then re-home the arm."""
 
+    if video is not None and not video.has_frames:
+        # 一条 action 都没执行过（例如第一次推理还没返回就按了 T），
+        # 缓冲区是空的，没有东西可编码；明确提示，别让操作员以为录像丢了。
+        print("No episode video recorded: no action ran before this reset.")
     if video is not None and video.has_frames:
+        # 缓冲的是每步观测：先记下 episode 结束时刻，问答耗时不进视频。
+        end = time.monotonic()
         try:
             answer = input("Save the recorded episode video? [y/N] ").strip().lower()
         except EOFError:
             answer = ""
         if answer in {"y", "yes"}:
-            video.save()
+            video.save(end=end)
         else:
             video.discard()
     _reset_to_start(env, reset_joints)

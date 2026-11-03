@@ -421,11 +421,15 @@ PYTHONPATH=src python -m apps.run_ws_control \
 模型动作按数据集帧率（15 Hz）节流，而不是 100 Hz 控制频率。循环运行中按
 **N** 或 **T**，机械臂会回到 `robot.reset_joints`，并按新位姿重新开始请求。
 
-加 `--save-video true` 可录制本次 episode：每条 action 执行后追加一帧，把
-第三人称和腕部画面左右拼接，写到
-`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`。按 **N**/**T** 复位时
-终端会询问 `Save the recorded episode video? [y/N]`，回答 `y` 才保留文件，
-其余回答在回位前删除；退出时未确认的录像也会被删除。`--dry-run` 下不录制。
+加 `--save-video true` 可录制本次 episode：每条 action 执行后把第三人称和腕部
+画面左右拼接，作为一帧存进内存列表；按 **N**/**T** 复位时终端询问
+`Save the recorded episode video? [y/N]`，回答 `y` 才把整段 episode 编码成
+`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，其余回答在回位前丢弃。
+如果先按 `Ctrl+C` 或达到 `--max-steps` 退出，内存里的 episode 也会在退出时
+编码保存，不按 N/T 也能拿到视频。视频按真实时间轴补帧，推理等待期间重复
+上一帧；停止前的等待也会用最后一帧补齐，结尾不会被截断。缓存按 1280x480
+每帧约 1.8 MB 计算，15 fps 下每分钟约 1.7 GB，长时间运行请定期保存。
+`--dry-run` 下不录制。
 
 `--model` 还可选择其他模型的交付协议：
 
@@ -436,7 +440,7 @@ PYTHONPATH=src python -m apps.run_ws_control \
 | `lingbot` | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
 | `pi05`（旧名 `openpi05`） | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
-| `flexpi` | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
+| `flexpi` | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`ur5e` profile） | ✅ |
 
 `fastwam` 把原始 JPEG 字节和关节状态直接作为 `infer` 帧发送（无握手，token
 追加在 URL 中）。`lingbot` 先消费连接元数据，再发
@@ -444,14 +448,14 @@ PYTHONPATH=src python -m apps.run_ws_control \
 观测请求前都再 reset 一次（服务端 streaming VAE 的帧缓存只在 reset 时清空），
 再把 `(dim, chunk, per_frame)` 响应里的零上下文动作块丢掉。`openwam` 先完成
 `ping` → `reset` 握手，`representation` 不是 `joint` 时直接拒绝，图像用
-base64 PNG。`lingbot` 和 `pi05` 的图像都是 HWC uint8，并用服务端自己的
-`__ndarray__` 编码（纯 msgpack，不是 msgpack-numpy）；`flexpi` 使用
-msgpack-numpy。`pi05_huashu` 返回 `(N, 7)` 绝对关节角，
+base64 PNG。`lingbot`、`pi05` 和 `flexpi` 的数组都用服务端自己的 `__ndarray__` 编码
+（纯 msgpack，不是 msgpack-numpy）。`pi05_huashu` 返回 `(N, 7)` 绝对关节角，
 可直接执行（服务端已完成反归一化和 Delta→ABS，客户端不要再加 state），
 而 `guodi`（20 维）/ `xinsong`（16 维）多臂检查点会被 7 维校验拦下，
-`flexiv` 的 7 维是 7 关节 Flexiv 臂、不能用于 UR5e。`flexpi` 的检查点面向
-Flexiv 机械臂，输出 13 维 HS13 末端状态，所以不加 `--dry-run` 会在连接
-机器人之前报错。
+`flexiv` 的 7 维是 7 关节 Flexiv 臂、不能用于 UR5e。`flexpi` 已适配 UR5e：
+请求体是 7 维关节状态（`[q1..q6, gripper]`）加必需的 6 维 `tcp_pose`，
+返回 `(N, 7)` 绝对关节角，可直接执行。旧的 13 维 HS13 Flex-π 检查点面向
+Flexiv 机械臂，会被 7 维校验拦下。
 
 无论哪个模型，返回动作不是 7 维时都会打印
 `WARNING: ... expected 7-dim single-arm UR5 actions, got D`；真机执行前直接

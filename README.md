@@ -436,12 +436,18 @@ values, the six joints must lie within ±2π rad, and each joint may move at mos
 **N** or **T** while the loop runs returns the arm to `robot.reset_joints` and
 restarts the request cycle from the new pose.
 
-Add `--save-video true` to record the episode: each executed action appends one
-frame that merges the third-person and wrist views side by side, written to
-`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`. On an **N**/**T** reset
-the terminal asks `Save the recorded episode video? [y/N]`; only `y` keeps the
-file, anything else discards it before the arm re-homes. Unconfirmed recordings
-are deleted on exit, and `--dry-run` never records.
+Add `--save-video true` to record the episode: each executed action appends a
+merged third-person + wrist frame to an in-memory buffer, and on an **N**/**T**
+reset the terminal asks `Save the recorded episode video? [y/N]`; only `y`
+encodes the buffered episode to
+`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`, anything else discards it
+before the arm re-homes. If the loop stops first (`Ctrl+C` or `--max-steps`), the
+buffered episode is encoded and kept on exit, so a run does not need an N/T reset
+to produce a video. Frames are paced to wall-clock time, so a slow inference step
+repeats the previous frame instead of compressing the video, and the last frame
+is held until the episode ends so the tail is not truncated. The buffer costs
+about 1.8 MB per frame at 1280x480 (~1.7 GB per minute at 15 fps), so save
+regularly on long runs. `--dry-run` never records.
 
 `--model` also selects one of the other delivery protocols:
 
@@ -452,7 +458,7 @@ are deleted on exit, and `--dry-run` never records.
 | `lingbot` | msgpack (`__ndarray__`) | 6 joints + gripper (`ur5` profile) | yes |
 | `openwam` | JSON text | 6 joints + gripper (`ur5` dataset) | yes |
 | `pi05` (`openpi05`) | msgpack (`__ndarray__`) | absolute joints + gripper (`pi05_huashu`) | yes |
-| `flexpi` | msgpack-numpy | 13-dim HS13 EEF state | no, `--dry-run` only |
+| `flexpi` | msgpack (`__ndarray__`) | absolute joints + gripper (`ur5e` profile) | yes |
 
 `fastwam` sends raw JPEG bytes and a joint-state vector directly as an `infer`
 frame (no handshake; the token is appended to the URL). `lingbot` consumes the
@@ -461,16 +467,18 @@ carry only `server_timing`), resets again before every observation request
 because the server's streaming VAE caches frames until reset, and drops the
 zero-context action block from each `(dim, chunk, per_frame)` response. `openwam` completes a `ping` → `reset`
 handshake, refuses non-`joint` representations, and sends base64 PNG images.
-`lingbot` and `pi05` both send HWC uint8 images with the server's own
-`__ndarray__` msgpack encoding (plain msgpack, not msgpack-numpy); `flexpi`
-uses msgpack-numpy. `pi05_huashu` returns `(N, 7)`
+`lingbot`, `pi05` and `flexpi` all send arrays with the server's own
+`__ndarray__` msgpack encoding (plain msgpack, not msgpack-numpy).
+`pi05_huashu` returns `(N, 7)`
 absolute joint actions, so it drives the arm directly (the server already
 undoes normalization and delta->ABS; the client must not add the state back).
 The multi-arm `guodi` / `xinsong` configs (20 / 16 dims) are stopped by the
 7-dim check, and `flexiv` is a 7-DOF arm, so its 7 values cannot be executed
-on the UR5e. `flexpi` targets a Flexiv arm and returns the 13-dim HS13
-end-effector state, so the app refuses to drive the robot with it unless
-`--dry-run` is given.
+on the UR5e. `flexpi` now targets the UR5e: its request carries the 7-dim
+joint state (`[q1..q6, gripper]`) plus the 6-dim `tcp_pose`, and it returns
+`(N, 7)` absolute joint actions that the app executes directly. The older
+13-dim HS13 Flex-π checkpoints target a Flexiv arm and are stopped by the
+7-dim check.
 
 Field mappings live in `run_ws_control.py` (`IMAGE_FIELDS`,
 `FASTWAM_IMAGE_FIELDS`, `PI05_IMAGE_FIELDS`, `LINGBOT_IMAGE_FIELDS`,

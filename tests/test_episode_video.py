@@ -36,7 +36,7 @@ class EpisodeVideoRecorderTest(unittest.TestCase):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
         with tempfile.TemporaryDirectory() as root:
-            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1e9)
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
             for _ in range(3):
                 recorder.add(make_obs())
 
@@ -53,28 +53,87 @@ class EpisodeVideoRecorderTest(unittest.TestCase):
             second = recorder.save()
             self.assertEqual(second.name, "video_2.mp4")
 
-    def test_discard_deletes_the_partial_file(self):
+    def test_discard_drops_the_buffer_without_writing(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
         with tempfile.TemporaryDirectory() as root:
-            recorder = EpisodeVideoRecorder(root=root, model="fastwam", fps=1e9)
+            recorder = EpisodeVideoRecorder(root=root, model="fastwam", fps=1000.0)
             recorder.add(make_obs())
-            path = recorder._path
-            self.assertTrue(path.exists())
+            # 缓冲在内存里：按 N 之前不落盘，丢弃时也不会留下文件。
+            self.assertTrue(recorder.has_frames)
+            self.assertFalse(list(Path(root).rglob("*.mp4")))
 
             recorder.discard()
 
-            self.assertFalse(path.exists())
             self.assertFalse(recorder.has_frames)
+            self.assertFalse(list(Path(root).rglob("*.mp4")))
 
     def test_writer_failure_disables_recording_without_raising(self):
         from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
         with tempfile.TemporaryDirectory() as root:
-            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1e9)
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
+            recorder.add(make_obs())
             with unittest.mock.patch(
                 "ur5e_control.runtime.episode_video._open_writer",
                 side_effect=RuntimeError("no encoder"),
+            ):
+                self.assertIsNone(recorder.save())
+
+            self.assertFalse(recorder.has_frames)
+            self.assertFalse(list(Path(root).rglob("*.mp4")))
+
+    def test_gaps_are_filled_so_playback_matches_wall_clock(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=10.0)
+            # 第一次 add 在 t=100.0；100.05 太近被节流；之后间隔 0.5 s 和 1.0 s。
+            with unittest.mock.patch(
+                "ur5e_control.runtime.episode_video.time.monotonic",
+                side_effect=[100.0, 100.05, 100.5, 101.5],
+            ):
+                recorder.add(make_obs())
+                recorder.add(make_obs())
+                recorder.add(make_obs())
+                recorder.add(make_obs())
+
+            # save 也补尾：显式给结束时刻，否则会用真实时钟算出巨大的空档。
+            path = recorder.save(end=101.5)
+            captured = cv2.VideoCapture(str(path))
+            frames = int(captured.get(cv2.CAP_PROP_FRAME_COUNT))
+            captured.release()
+
+        # 1 + 5（0.5 s）+ 10（1.0 s）= 16 帧，与 1.5 s 的真实时长对应。
+        self.assertEqual(frames, 16)
+
+    def test_save_holds_the_last_frame_until_the_episode_ends(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=10.0)
+            with unittest.mock.patch(
+                "ur5e_control.runtime.episode_video.time.monotonic",
+                return_value=100.0,
+            ):
+                recorder.add(make_obs())
+
+            # 动作在 t=100 结束，之后等推理 2 s 才停止：视频也要覆盖这 2 s。
+            path = recorder.save(end=102.0)
+            captured = cv2.VideoCapture(str(path))
+            frames = int(captured.get(cv2.CAP_PROP_FRAME_COUNT))
+            captured.release()
+
+        self.assertEqual(frames, 20)
+
+    def test_missing_opencv_disables_recording_without_raising(self):
+        from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
+
+        with tempfile.TemporaryDirectory() as root:
+            recorder = EpisodeVideoRecorder(root=root, model="json", fps=1000.0)
+            with unittest.mock.patch(
+                "ur5e_control.runtime.episode_video.merge_views",
+                side_effect=ModuleNotFoundError("No module named 'cv2'"),
             ):
                 recorder.add(make_obs())
 

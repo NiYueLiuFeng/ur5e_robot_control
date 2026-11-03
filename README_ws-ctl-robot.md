@@ -22,14 +22,15 @@
 | `lingbot` | LingBot-VA | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5` profile） | ✅ |
 | `openwam` | OpenWAM | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
 | `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
-| `flexpi` | Flex-π | msgpack-numpy | 13 维 HS13 末端状态 | ❌ 仅 `--dry-run` |
+| `flexpi` | Flex-π | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5e` profile） | ✅ |
 
-UR5e 的 `servoJ` 只接受**绝对关节角**，所以 `flexpi` 这类输出末端位姿的
-检查点绝不能被当成关节角下发。程序启动时就会拒绝这类组合，除非显式加
-`--dry-run`（只打印动作、不动机器人）。OpenPI 的 `pi05_huashu` 返回的是
-`(N, 7)` 绝对关节角，可直接执行；`guodi`（20 维）/ `xinsong`（16 维）是多臂
-检查点，会被 7 维校验拦下；`flexiv` 虽是 7 维，但那是 7 关节 Flexiv 臂，
-不是 UR5e 的 6 关节 + 夹爪。
+UR5e 的 `servoJ` 只接受**绝对关节角**，所以输出末端位姿的检查点绝不能被
+当成关节角下发。程序启动时会拒绝这类组合，除非显式加 `--dry-run`（只打印
+动作、不动机器人）。OpenPI 的 `pi05_huashu` 返回的是 `(N, 7)` 绝对关节角，
+可直接执行；Flex-π 的 `ur5e` 变体同样返回 `(N, 7)` 绝对关节角（`ur5e/block`
+等 profile），请求里额外带 6 维 `tcp_pose`；`guodi`（20 维）/ `xinsong`
+（16 维）是多臂检查点，会被 7 维校验拦下；`flexiv` 虽是 7 维，但那是
+7 关节 Flexiv 臂，不是 UR5e 的 6 关节 + 夹爪。
 
 和旧入口 `run-vla-inference`（CloudRobo-VLA msgpack 协议）互不影响，两者可并存。
 
@@ -55,9 +56,8 @@ uv run check-recording-ready \
   --check-robot-tcp
 ```
 
-`lingbot` / `pi05` 用服务端自己的 `__ndarray__` 编码（纯 msgpack，不是
-msgpack-numpy）；`flexpi` 需要 `msgpack-numpy`（已在项目依赖里）；`openwam`
-用 `cv2` 编码 PNG。
+`lingbot` / `pi05` / `flexpi` 用服务端自己的 `__ndarray__` 编码（纯
+msgpack，不是 msgpack-numpy）；`openwam` 用 `cv2` 编码 PNG。
 
 ---
 
@@ -254,13 +254,21 @@ uv run ws-control \
 ```
 
 - 每条 action 执行后取一帧，把第三人称（`third_left_top_rgb`）和腕部
-  （`wrist_rgb`）两路画面左右拼接到同一张图上，按动作帧率写盘。
-- 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，同一分钟内按
-  `video_1.mp4`、`video_2.mp4` 递增。
+  （`wrist_rgb`）两路画面左右拼接，连同时间戳存进内存列表；录的过程中不写盘。
 - 按 **N** / **T** 复位时，终端会询问
-  `Save the recorded episode video? [y/N]`：回答 `y` 保留文件，其他（含直接
-  回车）丢弃并删除半截文件，然后机械臂才回初始位姿。下一段 episode 从头录制。
-- `Ctrl+C` / `--max-steps` 结束时不会保存未确认的录像，避免留下损坏的 mp4。
+  `Save the recorded episode video? [y/N]`：回答 `y` 才把内存里的整段 episode
+  编码成视频，其他（含直接回车）直接丢弃，然后机械臂才回初始位姿。下一段
+  episode 从空列表重新录制。
+- 视频按真实时间轴补帧：两次 action 之间如果隔着推理等待，会重复上一帧填满
+  这段时间，播放速度与现场一致，而不是"一条 action 一帧"的加速版本。
+- 最后一条 action 之后到停止（Ctrl+C / N/T）之间的等待也会用最后一帧补齐，
+  所以视频时长覆盖整个 episode，结尾不会被截断。
+- 路径：`./save_video/<model>/<YYMMDD-HH:MM>/video_<num>.mp4`，目录按第一帧
+  的时间命名，同一分钟内按 `video_1.mp4`、`video_2.mp4` 递增。
+- 如果没按 N/T 就 `Ctrl+C` 或达到 `--max-steps`，退出时会把内存里的 episode
+  编码保存，不会因为直接退出而丢掉整段视频。
+- 内存占用约为 1280x480 每帧 1.8 MB，15 fps 下每分钟约 1.7 GB；超过 1 GiB 时
+  会打印一次提醒。长时间运行请定期按 N/T 保存。
 - `--dry-run` 下不录制（没有真实动作）。
 
 首次上真机建议：
@@ -521,19 +529,22 @@ uv run ws-control \
 
 ### 7.5 Flex-π（`--model flexpi`）
 
-msgpack-numpy 协议，同样先消费 metadata。请求体是 HS13 的 13 维状态：
+纯 msgpack 协议（数组走服务端自己的 `__ndarray__` 编码），同样先消费
+metadata。UR5e 变体的请求体是 7 维关节状态加 6 维 `tcp_pose`：
 
 | 请求字段 | 来源 |
 | --- | --- |
-| `state[0:6]` | `obs["tcp_pose"]`（位置 xyz + 轴角） |
-| `state[6]` | `obs["gripper_position_raw"]`（0~1000） |
-| `state[7:13]` | `obs["tcp_force"]`（力 xyz + 力矩） |
+| `state[0:6]` | `obs["joint_positions"][:6]`（6 个关节角，原始弧度） |
+| `state[6]` | `obs["joint_positions"][6]`（夹爪，0 关闭 / 1 打开） |
+| `tcp_pose` | `obs["tcp_pose"]`（xyz 米 + 旋转向量，不是欧拉角） |
 | `images["cam_high"]` | `third_left_top_rgb` |
 | `images["cam_left_wrist"]` | `wrist_rgb` |
 | `prompt` | `task.file` 的 `task`，或 `--task` |
 
-Flex-π 的检查点面向 Flexiv 机械臂，13 维是末端状态而不是 UR5e 关节角，
-所以同样只能 `--dry-run`。
+服务端返回 `(N, 7)`（UR5e 检查点为 32×7）：6 个绝对关节目标 + 0~1 连续
+夹爪，已在服务端完成反归一化，不做增量还原。客户端按 `vla.execute_horizon`
+截取并把夹爪二值化为 0/1000 后下发。旧的 13 维 HS13 检查点面向 Flexiv
+机械臂，会被 7 维校验拦下。
 
 ---
 
@@ -545,7 +556,7 @@ Flex-π 的检查点面向 Flexiv 机械臂，13 维是末端状态而不是 UR5
 | `ConnectionRefusedError` / 连接超时 | 服务端未启动、端口错误，或 `--server-url` 写错 |
 | `JSONDecodeError` | 服务端返回了二进制/msgpack；确认 `--model` 与协议一致 |
 | `returns ... but the UR5e executes only absolute 6-joint` | 选了 EEF 模型；换 UR5 检查点，或加 `--dry-run` |
-| `expected 7-dim single-arm UR5 actions ..., got ...` | 返回动作不是 7 维（单臂 = 6 关节 + 夹爪）；加载了别的机器人/任务的检查点（如 13 维 HS13）。`--dry-run` 下只告警不停止 |
+| `expected 7-dim single-arm UR5 actions ..., got ...` | 返回动作不是 7 维（单臂 = 6 关节 + 夹爪）；加载了别的机器人/任务的检查点（如 13 维 HS13 Flex-π）。`--dry-run` 下只告警不停止 |
 | `policy response 'action' must be a list of 7-value actions` | `json`/`openwam` 返回维度不是 `N×7` |
 | `unexpected OpenWAM frame type` | 服务端没按 `ping → reset → obs` 的约定回复 |
 | 夹爪不动作或方向相反 | 调整 `vla.threshold`（0~1 输出用 0.7，0~1000 输出用 500） |
