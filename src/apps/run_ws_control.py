@@ -17,6 +17,10 @@
   ``__ndarray__`` array encoding.
 - ``flexpi``: Flex-π msgpack frames using the server's ``__ndarray__`` array
   encoding, with the 7-dim UR5e joint state and the 6-dim ``tcp_pose``.
+- ``wr-wam``: wr-wam (``ur5e_step23300``) msgpack frames using the same
+  ``__ndarray__`` encoding: ``state``, ``tcp_pose``, ``images.cam_high``,
+  ``images.cam_left_wrist`` and ``prompt``. The server sends metadata on
+  connect and returns a ``(32, 7)`` absolute joint action chunk.
 
 Execution contract: the UR5e accepts absolute 6-joint + gripper commands, so
 only 7-value joint actions are sent to the robot. Every action is validated
@@ -27,7 +31,9 @@ returns absolute joint angles, so it drives the arm directly: FastWAM
 ``pi05`` (``pi05_huashu`` delivers ``(50, 7)`` absolute joints; the server
 already undoes normalization and delta->ABS, so the client must not add the
 state back) and Flex-π ``ur5e`` (7-dim joint state plus the required 6-dim
-``tcp_pose``, and ``(32, 7)`` absolute joint actions). Non-UR5e ``pi05``
+``tcp_pose``, and ``(32, 7)`` absolute joint actions), and wr-wam
+``ur5e_step23300`` (the same ``state`` / ``tcp_pose`` / raw-RGB fields, with a
+``(32, 7)`` absolute joint action chunk). Non-UR5e ``pi05``
 configs must not be executed: ``guodi`` (20-dim) and ``xinsong`` (16-dim) fail
 the 7-dim check, and ``flexiv`` is a 7-DOF arm whose 7 values are not a UR5e
 6-joint + gripper command. Non-UR5e Flex-π checkpoints (the 13-dim HS13
@@ -67,11 +73,13 @@ from ur5e_control.runtime.config import load_runtime_config, resolve_repo_path
 from ur5e_control.runtime.env import build_robot_env
 from ur5e_control.runtime.episode_video import EpisodeVideoRecorder
 
-MODELS = ("json", "fastwam", "pi05", "lingbot", "flexpi", "openwam")
+MODELS = ("json", "fastwam", "pi05", "lingbot", "flexpi", "wr-wam", "openwam")
 # 旧名字保留，等价于 pi05。
-MODEL_ALIASES = {"openpi05": "pi05"}
+MODEL_ALIASES = {"openpi05": "pi05", "wrwam": "wr-wam", "wr_wam": "wr-wam"}
 # 每条 action 的维度：6 个关节角（rad）+ 1 个夹爪值。
 ACTION_DIM = 7
+# TCP 位姿维度：xyz（米）+ 旋转向量（rad）。
+TCP_POSE_DIM = 6
 # UR5e 关节角的安全读数范围（rad），超出说明服务端返回了别的语义。
 JOINT_LIMIT_RAD = 2.0 * math.pi
 # FastWAM 的去噪步数。
@@ -100,6 +108,11 @@ LINGBOT_IMAGE_FIELDS = {
 }
 # flexpi 协议：服务端相机名 -> RobotEnv.get_obs() 键名。
 FLEXPI_IMAGE_FIELDS = {
+    "cam_high": "third_left_top_rgb",
+    "cam_left_wrist": "wrist_rgb",
+}
+# wr-wam（ur5e_step23300）协议：与 flexpi 相同的相机槽位。
+WRWAM_IMAGE_FIELDS = {
     "cam_high": "third_left_top_rgb",
     "cam_left_wrist": "wrist_rgb",
 }
@@ -137,6 +150,7 @@ MODEL_SPECS = {
     "openwam": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "pi05": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
     "flexpi": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
+    "wr-wam": ModelSpec("joint", 15.0, "7 维绝对关节角 + 夹爪"),
 }
 # 按这些键时让机械臂回到 robot.reset_joints（复位）。
 RESET_KEYS = ("n", "t")
@@ -207,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(*MODELS, *MODEL_ALIASES),
         default=None,
         help="Policy protocol: 'json' (default), 'fastwam', 'lingbot', 'openwam', "
-        "'pi05' (alias 'openpi05') or 'flexpi'.",
+        "'pi05' (alias 'openpi05'), 'flexpi' or 'wr-wam' (alias 'wrwam').",
     )
     parser.add_argument("--server-url", default=None, help="Policy WebSocket URL.")
     parser.add_argument("--api-key", default=None, help="Optional policy API key.")
@@ -569,8 +583,8 @@ def get_model_body(
     """返回固定格式的请求 body。
 
     图片键名分别是 `IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS`、`PI05_IMAGE_FIELDS`、
-    `LINGBOT_IMAGE_FIELDS`、`FLEXPI_IMAGE_FIELDS` 和 `OPENWAM_IMAGE_FIELDS`。
-    换模型要改字段时，直接改这几个常量。
+    `LINGBOT_IMAGE_FIELDS`、`FLEXPI_IMAGE_FIELDS`、`WRWAM_IMAGE_FIELDS` 和
+    `OPENWAM_IMAGE_FIELDS`。换模型要改字段时，直接改这几个常量。
 
     `openwam_chunk` 只影响 openwam：置 True 时在 obs 里带 `"chunk": true`，请求
     服务端一次返回整个动作块。未打补丁的服务端会忽略这个字段，回包仍是单条
@@ -599,15 +613,20 @@ def get_model_body(
         # compute_kv_cache 请求的关键帧也用同一套键名，见 `_lingbot_images`。
         return {"obs": _lingbot_images(obs), "prompt": task}
 
-    if model == "flexpi":
-        # Flex-π 的 UR5e 变体：state 是 6 关节角 + 归一化夹爪，另外必须带
-        # 训练同坐标系的 6 维 tcp_pose（xyz + 旋转向量，不是欧拉角）。
+    if model in {"flexpi", "wr-wam"}:
+        # Flex-π / wr-wam 的 UR5e 变体：state 是 6 关节角 + 归一化夹爪，另外
+        # 必须带训练同坐标系的 6 维 tcp_pose（xyz + 旋转向量，不是欧拉角）。
+        # wr-wam 的字段名与 flexpi 相同，但相机槽位单独维护，便于以后分开改。
+        label = "Flex-π" if model == "flexpi" else "wr-wam"
+        image_fields = (
+            FLEXPI_IMAGE_FIELDS if model == "flexpi" else WRWAM_IMAGE_FIELDS
+        )
         return {
-            "state": _flexpi_state(obs),
-            "tcp_pose": _flexpi_tcp_pose(obs),
+            "state": _flexpi_state(obs, label=label),
+            "tcp_pose": _flexpi_tcp_pose(obs, label=label),
             "images": {
                 name: _to_hwc_uint8(obs[obs_key])
-                for name, obs_key in FLEXPI_IMAGE_FIELDS.items()
+                for name, obs_key in image_fields.items()
             },
             "prompt": task,
         }
@@ -676,8 +695,8 @@ def _to_hwc_uint8(image: Any) -> np.ndarray:
     return np.ascontiguousarray(rgb, dtype=np.uint8)
 
 
-def _flexpi_state(obs: dict[str, Any]) -> np.ndarray:
-    """Return the 7-dim UR5e state Flex-π expects.
+def _flexpi_state(obs: dict[str, Any], *, label: str = "Flex-π") -> np.ndarray:
+    """Return the 7-dim UR5e state Flex-π (and wr-wam) expects.
 
     The UR5e profile trains on ``observation.state`` =
     ``[q1..q6, gripper]``: six joint angles in native radians plus the
@@ -689,18 +708,21 @@ def _flexpi_state(obs: dict[str, Any]) -> np.ndarray:
     state = np.asarray(obs["joint_positions"], dtype=np.float32).reshape(-1)
     if state.size != ACTION_DIM:
         raise ValueError(
-            f"Flex-π state must contain {ACTION_DIM} values "
+            f"{label} state must contain {ACTION_DIM} values "
             f"(6 joints + gripper), got {state.size}"
         )
     return state
 
 
-def _flexpi_tcp_pose(obs: dict[str, Any]) -> np.ndarray:
-    """Return the 6-dim ``tcp_pose`` Flex-π requires: xyz + rotation vector."""
+def _flexpi_tcp_pose(obs: dict[str, Any], *, label: str = "Flex-π") -> np.ndarray:
+    """Return the 6-dim ``tcp_pose`` Flex-π (and wr-wam) requires: xyz + rotvec."""
 
     tcp_pose = np.asarray(obs["tcp_pose"], dtype=np.float32).reshape(-1)
-    if tcp_pose.size != 6:
-        raise ValueError(f"Flex-π tcp_pose must contain 6 values, got {tcp_pose.size}")
+    if tcp_pose.size != TCP_POSE_DIM:
+        raise ValueError(
+            f"{label} tcp_pose must contain {TCP_POSE_DIM} values, "
+            f"got {tcp_pose.size}"
+        )
     return tcp_pose
 
 
@@ -709,7 +731,7 @@ def _request(connection: Any, body: dict[str, Any], *, model: str) -> dict[str, 
 
     model = _normalize_model(model)
 
-    if model in {"lingbot", "pi05", "flexpi"}:
+    if model in {"lingbot", "pi05", "flexpi", "wr-wam"}:
         # 这些服务端都用纯 msgpack 收包，数组走它们自己的 `__ndarray__` 帧，
         # 不是 msgpack-numpy；发 msgpack-numpy 数组时服务端会把它当成普通 dict，
         # 随后 float(dict) 报 "float() argument must be ... not 'dict'"。
@@ -787,10 +809,43 @@ def _prepare_server(connection: Any, *, model: str, task: str) -> None:
         print(f"{model} server metadata: {metadata}")
         return
 
-    if model == "flexpi":
+    if model in {"flexpi", "wr-wam"}:
         # 与 lingbot/pi05 相同，metadata 也走服务端的 `__ndarray__` 编码。
         metadata = _unpack_ndarray(connection.recv())
         print(f"{model} server metadata: {metadata}")
+        if model == "wr-wam":
+            # wr-wam 的字段名固定，先按 metadata 校验维度和 prompt，
+            # 避免服务端 assert 报错时机械臂已经移动。
+            _check_wrwam_metadata(metadata, task=task)
+
+
+def _check_wrwam_metadata(metadata: dict[str, Any], *, task: str) -> None:
+    """Validate wr-wam's connect metadata against the client's field contract."""
+
+    expected_dims = {
+        "state_dim": ACTION_DIM,
+        "tcp_pose_dim": TCP_POSE_DIM,
+        "action_dim": ACTION_DIM,
+    }
+    for key, expected in expected_dims.items():
+        if key in metadata and metadata[key] != expected:
+            raise RuntimeError(
+                f"wr-wam server {key}={metadata[key]!r}, expected {expected}"
+            )
+    camera_keys = metadata.get("camera_keys")
+    if camera_keys is not None:
+        missing = set(WRWAM_IMAGE_FIELDS) - set(camera_keys)
+        if missing:
+            raise RuntimeError(
+                "wr-wam server camera_keys is missing "
+                f"{sorted(missing)}; expected {sorted(WRWAM_IMAGE_FIELDS)}"
+            )
+    prompts = metadata.get("prompts")
+    if prompts is not None and task not in prompts:
+        raise RuntimeError(
+            f"wr-wam task {task!r} is not one of the server prompts: "
+            f"{list(prompts)}"
+        )
 
 
 def _reset_lingbot(connection: Any, task: str, *, verbose: bool = True) -> None:
@@ -846,7 +901,7 @@ def _parse_actions(response: dict[str, Any], *, model: str) -> np.ndarray:
             raise RuntimeError(f"unexpected OpenWAM frame type: {kind!r}")
     elif model == "lingbot":
         actions = _lingbot_chunk(response)
-    elif model in {"fastwam", "pi05", "flexpi"}:
+    elif model in {"fastwam", "pi05", "flexpi", "wr-wam"}:
         if "actions" in response:
             actions = np.asarray(response["actions"], dtype=float)
         elif "action" in response:
@@ -1007,6 +1062,8 @@ def _check_action_shape(
             " (load the Flex-π ur5e checkpoint; the 13-dim HS13 model is for a "
             "Flexiv arm)"
         )
+    elif model == "wr-wam":
+        hint = " (load the wr-wam ur5e_step23300 checkpoint)"
     message = (
         f"{model}: expected {ACTION_DIM}-dim single-arm UR5 actions "
         f"(6 joints + gripper), got {actions.shape[1]}{hint}"
@@ -1028,8 +1085,8 @@ def _ensure_executable(model: str, *, dry_run: bool) -> None:
         f"model {model!r} returns {spec.note}, but the UR5e executes only "
         "absolute 6-joint + gripper commands. Use a UR5 checkpoint (FastWAM "
         "autogen_mixed_ur5, LingBot-VA ur5, OpenWAM ur5, OpenPI pi05_huashu, "
-        "Flex-π ur5e) or pass --dry-run to inspect the actions without moving "
-        "the robot."
+        "Flex-π ur5e, wr-wam ur5e_step23300) or pass --dry-run to inspect the "
+        "actions without moving the robot."
     )
 
 
@@ -1095,6 +1152,14 @@ def _encode_ndarray(array: np.ndarray) -> dict[bytes, Any]:
 
 def _unpack_ndarray(data: Any) -> dict[str, Any]:
     if isinstance(data, str):
+        # wr-wam 等 msgpack 服务端出错时回的是 JSON 文本帧，例如
+        # {"error": "..."}；把原始错误直接带出来，别只报 "returned text"。
+        try:
+            frame = json.loads(data)
+        except json.JSONDecodeError:
+            frame = None
+        if isinstance(frame, dict) and frame.get("error"):
+            raise RuntimeError(f"policy server error: {frame['error']}")
         raise RuntimeError(f"policy server returned text: {data}")
     frame = msgpack.unpackb(
         data, raw=False, strict_map_key=False, object_hook=_decode_ndarray

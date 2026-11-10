@@ -466,6 +466,7 @@ episodes do not grow the process. `--dry-run` never records.
 | `openwam` | JSON text | 6 joints + gripper (`ur5` dataset) | yes |
 | `pi05` (`openpi05`) | msgpack (`__ndarray__`) | absolute joints + gripper (`pi05_huashu`) | yes |
 | `flexpi` | msgpack (`__ndarray__`) | absolute joints + gripper (`ur5e` profile) | yes |
+| `wr-wam` (`wrwam`) | msgpack (`__ndarray__`) | absolute joints + gripper (`ur5e_step23300`) | yes |
 
 `fastwam` sends raw JPEG bytes and a joint-state vector directly as an `infer`
 frame (no handshake; the token is appended to the URL). `lingbot` consumes the
@@ -474,7 +475,7 @@ carry only `server_timing`), resets again before every observation request
 because the server's streaming VAE caches frames until reset, and drops the
 zero-context action block from each `(dim, chunk, per_frame)` response. `openwam` completes a `ping` → `reset`
 handshake, refuses non-`joint` representations, and sends base64 PNG images.
-`lingbot`, `pi05` and `flexpi` all send arrays with the server's own
+`lingbot`, `pi05`, `flexpi` and `wr-wam` all send arrays with the server's own
 `__ndarray__` msgpack encoding (plain msgpack, not msgpack-numpy).
 `pi05_huashu` returns `(N, 7)`
 absolute joint actions, so it drives the arm directly (the server already
@@ -485,11 +486,15 @@ on the UR5e. `flexpi` now targets the UR5e: its request carries the 7-dim
 joint state (`[q1..q6, gripper]`) plus the 6-dim `tcp_pose`, and it returns
 `(N, 7)` absolute joint actions that the app executes directly. The older
 13-dim HS13 Flex-π checkpoints target a Flexiv arm and are stopped by the
-7-dim check.
+7-dim check. `wr-wam` targets the `ur5e_step23300` delivery service: it sends
+the same 7-dim state and 6-dim `tcp_pose` under the `state` / `tcp_pose` /
+`images` / `prompt` keys, validates the connect metadata (`state_dim`,
+`tcp_pose_dim`, `action_dim`, `camera_keys`, `prompts`) before moving the arm,
+and executes the returned `(32, 7)` absolute joint chunk directly.
 
 Field mappings live in `run_ws_control.py` (`IMAGE_FIELDS`,
 `FASTWAM_IMAGE_FIELDS`, `PI05_IMAGE_FIELDS`, `LINGBOT_IMAGE_FIELDS`,
-`FLEXPI_IMAGE_FIELDS`, `OPENWAM_IMAGE_FIELDS`).
+`FLEXPI_IMAGE_FIELDS`, `WRWAM_IMAGE_FIELDS`, `OPENWAM_IMAGE_FIELDS`).
 
 ## Project Layout
 

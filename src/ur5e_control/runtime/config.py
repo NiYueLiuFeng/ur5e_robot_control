@@ -14,9 +14,15 @@ DEFAULT_VLA_IMAGE_KEY_MAP = {
     "wrist_rgb": "observation.images.wrist_image",
 }
 # ws-control 支持的策略服务协议。
-VLA_MODELS = frozenset({"json", "fastwam", "pi05", "lingbot", "flexpi", "openwam"})
+VLA_MODELS = frozenset(
+    {"json", "fastwam", "pi05", "lingbot", "flexpi", "wr-wam", "openwam"}
+)
 # 旧配置里的名字，统一成规范名。
-VLA_MODEL_ALIASES = {"openpi05": "pi05"}
+VLA_MODEL_ALIASES = {
+    "openpi05": "pi05",
+    "wrwam": "wr-wam",
+    "wr_wam": "wr-wam",
+}
 
 
 @dataclass(frozen=True)
@@ -288,7 +294,8 @@ class VLARuntimeConfig:
     max_joint_delta: float | None = 0.1
     reset_on_start: bool = True
     threshold: float | None = 0.7
-    # ws-control 协议: json / fastwam / lingbot / openwam / pi05 / flexpi。
+    # ws-control 协议: json / fastwam / lingbot / openwam / pi05 / flexpi /
+    # wr-wam。
     model: str = "json"
     # 动作下发帧率；None 表示用协议对应的默认值，json 则跟随控制频率。
     action_hz: float | None = None

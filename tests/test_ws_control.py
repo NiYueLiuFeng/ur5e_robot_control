@@ -432,8 +432,9 @@ class OpenPI05ProtocolTest(unittest.TestCase):
     def test_joint_models_can_drive_the_robot(self):
         from apps.run_ws_control import _ensure_executable
 
-        # Flex-π 的 ur5e 变体、pi05 和 fastwam 都交付绝对关节角。
+        # Flex-π 的 ur5e 变体、wr-wam、pi05 和 fastwam 都交付绝对关节角。
         _ensure_executable("flexpi", dry_run=False)
+        _ensure_executable("wr-wam", dry_run=False)
         _ensure_executable("pi05", dry_run=False)
         _ensure_executable("fastwam", dry_run=False)
 
@@ -567,6 +568,157 @@ class FlexPiProtocolTest(unittest.TestCase):
             model="flexpi",
             vla=make_vla(),
             task="pick",
+            max_steps=2,
+            control_hz=1000.0,
+        )
+
+        self.assertEqual(executed, 2)
+        self.assertEqual(len(env.commands), 2)
+        self.assertEqual(env.commands[0][-1], 1000.0)
+        self.assertEqual(env.commands[1][-1], 0.0)
+
+
+class WrWamProtocolTest(unittest.TestCase):
+    """wr-wam (ur5e_step23300) uses the recorded UR5e state + tcp_pose fields."""
+
+    def setUp(self):
+        self.obs = {
+            "joint_positions": np.array(
+                [2, -1.5, 1.6, -1.5, -1.5, 0.1, 1], dtype=float
+            ),
+            "tcp_pose": np.arange(6, dtype=float),
+            "third_left_top_rgb": np.zeros((8, 8, 3), dtype=np.uint8),
+            "wrist_rgb": np.full((8, 8, 3), 255, dtype=np.uint8),
+        }
+        self.metadata = {
+            "policy": "ur5e_step23300_bf16",
+            "state_dim": 7,
+            "tcp_pose_dim": 6,
+            "action_dim": 7,
+            "action_horizon": 32,
+            "camera_keys": ["cam_high", "cam_left_wrist"],
+            "prompts": ["pick the pen", "pick the block"],
+        }
+
+    def test_request_uses_recorded_state_and_camera_slots(self):
+        from apps.run_ws_control import get_model_body
+
+        body = get_model_body(self.obs, model="wr-wam", task="pick the pen")
+
+        self.assertEqual(set(body), {"state", "tcp_pose", "images", "prompt"})
+        np.testing.assert_allclose(
+            np.asarray(body["state"]), [2, -1.5, 1.6, -1.5, -1.5, 0.1, 1]
+        )
+        np.testing.assert_allclose(np.asarray(body["tcp_pose"]), np.arange(6))
+        self.assertEqual(set(body["images"]), {"cam_high", "cam_left_wrist"})
+        self.assertEqual(body["images"]["cam_high"].dtype, np.uint8)
+        self.assertEqual(body["images"]["cam_high"].shape, (8, 8, 3))
+        self.assertEqual(body["prompt"], "pick the pen")
+
+    def test_alias_normalizes_to_wr_wam(self):
+        from apps.run_ws_control import _normalize_model
+
+        self.assertEqual(_normalize_model("wrwam"), "wr-wam")
+        self.assertEqual(_normalize_model("WR-WAM"), "wr-wam")
+
+    def test_prepare_server_consumes_and_validates_metadata(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [msgpack.packb(self.metadata, use_bin_type=True)]
+        )
+
+        _prepare_server(connection, model="wr-wam", task="pick the pen")
+
+        self.assertEqual(connection.sent, [])
+        self.assertEqual(connection.responses, [])
+
+    def test_prepare_server_rejects_unknown_prompt(self):
+        from apps.run_ws_control import _prepare_server
+
+        connection = FakeConnection(
+            [msgpack.packb(self.metadata, use_bin_type=True)]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "not one of the server prompts"):
+            _prepare_server(connection, model="wr-wam", task="pick the screw")
+
+    def test_prepare_server_rejects_wrong_action_dim(self):
+        from apps.run_ws_control import _prepare_server
+
+        metadata = dict(self.metadata, action_dim=14)
+        connection = FakeConnection([msgpack.packb(metadata, use_bin_type=True)])
+
+        with self.assertRaisesRegex(RuntimeError, "action_dim=14"):
+            _prepare_server(connection, model="wr-wam", task="pick the pen")
+
+    def test_request_round_trips_ndarray_body(self):
+        from apps.run_ws_control import _request
+
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
+        body = {
+            "state": np.arange(7, dtype=np.float32),
+            "tcp_pose": np.arange(6, dtype=np.float32),
+            "images": {"cam_high": np.zeros((3, 4, 4), dtype=np.uint8)},
+            "prompt": "pick",
+        }
+        actions = np.array([[0.1] * 6 + [0.9]], dtype=np.float32)
+        connection = FakeConnection(
+            [msgpack.packb({"actions": server_array(actions)}, use_bin_type=True)]
+        )
+
+        response = _request(connection, body, model="wr-wam")
+
+        sent = msgpack.unpackb(connection.sent[0], raw=False, strict_map_key=False)
+        self.assertTrue(sent["state"][b"__ndarray__"])
+        self.assertTrue(sent["tcp_pose"][b"__ndarray__"])
+        self.assertTrue(sent["images"]["cam_high"][b"__ndarray__"])
+        np.testing.assert_allclose(response["actions"], actions)
+
+    def test_server_error_text_frame_is_surfaced(self):
+        from apps.run_ws_control import _request
+
+        connection = FakeConnection(
+            [json.dumps({"error": "prompt must match /metadata"})]
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "prompt must match"):
+            _request(connection, {"state": [0] * 7}, model="wr-wam")
+
+    def test_joint_actions_drive_the_robot(self):
+        from apps.run_ws_control import _run
+
+        def server_array(array):
+            array = np.ascontiguousarray(array)
+            return {
+                b"__ndarray__": True,
+                b"data": array.tobytes(),
+                b"dtype": array.dtype.str,
+                b"shape": list(array.shape),
+            }
+
+        actions = np.array(
+            [[0.1] * 6 + [0.9], [0.2] * 6 + [0.1]], dtype=np.float32
+        )
+        connection = FakeConnection(
+            [msgpack.packb({"actions": server_array(actions)}, use_bin_type=True)]
+        )
+        env = FakeEnv(dict(self.obs))
+
+        executed = _run(
+            env,
+            connection,
+            model="wr-wam",
+            vla=make_vla(),
+            task="pick the pen",
             max_steps=2,
             control_hz=1000.0,
         )

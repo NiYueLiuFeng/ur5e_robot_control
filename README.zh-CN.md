@@ -32,7 +32,7 @@
 - 机器人与相机服务之间的 ZMQ 进程边界，带超时、请求套接字恢复和
   最新帧相机缓存
 - 新增 `ws-control`：支持 JSON / FastWAM / LingBot-VA / OpenWAM / OpenPI 0.5 /
-  Flex-π 协议的策略控制入口，且只执行 7 维单臂关节动作
+  Flex-π / wr-wam 协议的策略控制入口，且只执行 7 维单臂关节动作
 
 重要验证事项：
 
@@ -444,6 +444,7 @@ PYTHONPATH=src python -m apps.run_ws_control \
 | `openwam` | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
 | `pi05`（旧名 `openpi05`） | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`ur5e` profile） | ✅ |
+| `wr-wam`（旧名 `wrwam`） | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`ur5e_step23300`） | ✅ |
 
 `fastwam` 把原始 JPEG 字节和关节状态直接作为 `infer` 帧发送（无握手，token
 追加在 URL 中）。`lingbot` 先消费连接元数据，再发
@@ -451,14 +452,17 @@ PYTHONPATH=src python -m apps.run_ws_control \
 观测请求前都再 reset 一次（服务端 streaming VAE 的帧缓存只在 reset 时清空），
 再把 `(dim, chunk, per_frame)` 响应里的零上下文动作块丢掉。`openwam` 先完成
 `ping` → `reset` 握手，`representation` 不是 `joint` 时直接拒绝，图像用
-base64 PNG。`lingbot`、`pi05` 和 `flexpi` 的数组都用服务端自己的 `__ndarray__` 编码
+base64 PNG。`lingbot`、`pi05`、`flexpi` 和 `wr-wam` 的数组都用服务端自己的 `__ndarray__` 编码
 （纯 msgpack，不是 msgpack-numpy）。`pi05_huashu` 返回 `(N, 7)` 绝对关节角，
 可直接执行（服务端已完成反归一化和 Delta→ABS，客户端不要再加 state），
 而 `guodi`（20 维）/ `xinsong`（16 维）多臂检查点会被 7 维校验拦下，
 `flexiv` 的 7 维是 7 关节 Flexiv 臂、不能用于 UR5e。`flexpi` 已适配 UR5e：
 请求体是 7 维关节状态（`[q1..q6, gripper]`）加必需的 6 维 `tcp_pose`，
 返回 `(N, 7)` 绝对关节角，可直接执行。旧的 13 维 HS13 Flex-π 检查点面向
-Flexiv 机械臂，会被 7 维校验拦下。
+Flexiv 机械臂，会被 7 维校验拦下。`wr-wam` 面向 `ur5e_step23300` 交付服务：
+请求字段同样是 7 维 `state`、6 维 `tcp_pose`、`images` 和 `prompt`，客户端
+在移动机械臂前校验连接 metadata（`state_dim`、`tcp_pose_dim`、`action_dim`、
+`camera_keys`、`prompts`），并直接执行返回的 `(32, 7)` 绝对关节动作块。
 
 无论哪个模型，返回动作不是 7 维时都会打印
 `WARNING: ... expected 7-dim single-arm UR5 actions, got D`；真机执行前直接
@@ -466,7 +470,7 @@ Flexiv 机械臂，会被 7 维校验拦下。
 
 字段映射位于 `run_ws_control.py` 的 `IMAGE_FIELDS`、`FASTWAM_IMAGE_FIELDS`、
 `PI05_IMAGE_FIELDS`、`LINGBOT_IMAGE_FIELDS`、`FLEXPI_IMAGE_FIELDS`、
-`OPENWAM_IMAGE_FIELDS`。
+`WRWAM_IMAGE_FIELDS`、`OPENWAM_IMAGE_FIELDS`。
 
 更完整的 `ws-control` 操作说明（含硬件自检、各协议报文和排错）见
 [README_ws-ctl-robot.md](README_ws-ctl-robot.md)。
@@ -475,7 +479,7 @@ Flexiv 机械臂，会被 7 维校验拦下。
 
 ```yaml
 vla:
-  model: "json"      # json（默认）、fastwam、lingbot、openwam、pi05、flexpi
+  model: "json"      # json（默认）、fastwam、lingbot、openwam、pi05、flexpi、wr-wam
 ```
 
 也可以在命令行用 `--model` 覆盖 YAML；换模型先用 `--dry-run` 确认动作数值。

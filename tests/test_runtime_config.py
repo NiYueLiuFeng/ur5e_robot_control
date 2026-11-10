@@ -197,6 +197,8 @@ class RuntimeConfigTest(unittest.TestCase):
 
         self.assertEqual(replace(VLARuntimeConfig(), model="openpi05").model, "pi05")
         self.assertEqual(replace(VLARuntimeConfig(), model="LingBot").model, "lingbot")
+        self.assertEqual(replace(VLARuntimeConfig(), model="wrwam").model, "wr-wam")
+        self.assertEqual(replace(VLARuntimeConfig(), model="WR-WAM").model, "wr-wam")
 
     def test_unknown_vla_model_is_rejected(self):
         from dataclasses import replace

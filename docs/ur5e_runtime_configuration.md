@@ -690,7 +690,7 @@ vla:
   request_timeout_s: 5.0
   max_joint_delta: 0.1
   reset_on_start: true
-  model: "json"          # json / fastwam / lingbot / openwam / pi05 / flexpi
+  model: "json"          # json / fastwam / lingbot / openwam / pi05 / flexpi / wr-wam
   action_hz:             # 留空用协议默认值（模型 15 Hz，json 跟随 control_hz）
 ```
 
@@ -746,7 +746,7 @@ max_joint_delta: 0.1
 | `UR5E_VLA_REQUEST_TIMEOUT_S` | `vla.request_timeout_s` |
 | `UR5E_VLA_MAX_JOINT_DELTA` | `vla.max_joint_delta`，可用 `none` 关闭 |
 | `UR5E_VLA_RESET_ON_START` | `vla.reset_on_start` |
-| `UR5E_VLA_MODEL` | `vla.model`：`json` / `fastwam` / `lingbot` / `openwam` / `pi05` / `flexpi` |
+| `UR5E_VLA_MODEL` | `vla.model`：`json` / `fastwam` / `lingbot` / `openwam` / `pi05` / `flexpi` / `wr-wam` |
 | `UR5E_VLA_ACTION_HZ` | `vla.action_hz`，可用 `none` 恢复协议默认值 |
 | `UR5E_TASK_FILE` | `task.file` |
 | `UR5E_EPISODE_COUNT` | `task.episode_count` |

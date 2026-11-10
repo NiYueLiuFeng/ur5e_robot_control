@@ -23,12 +23,15 @@
 | `openwam` | OpenWAM | JSON 文本 | 6 关节 + 夹爪（`ur5` 数据集） | ✅ |
 | `pi05`（旧名 `openpi05`） | OpenPI 0.5 | msgpack（`__ndarray__`） | 绝对关节角 + 夹爪（`pi05_huashu`） | ✅ |
 | `flexpi` | Flex-π | msgpack（`__ndarray__`） | 6 关节 + 夹爪（`ur5e` profile） | ✅ |
+| `wr-wam`（旧名 `wrwam`） | wr-wam（`ur5e_step23300`） | msgpack（`__ndarray__`） | 6 关节 + 夹爪（UR5e） | ✅ |
 
 UR5e 的 `servoJ` 只接受**绝对关节角**，所以输出末端位姿的检查点绝不能被
 当成关节角下发。程序启动时会拒绝这类组合，除非显式加 `--dry-run`（只打印
 动作、不动机器人）。OpenPI 的 `pi05_huashu` 返回的是 `(N, 7)` 绝对关节角，
 可直接执行；Flex-π 的 `ur5e` 变体同样返回 `(N, 7)` 绝对关节角（`ur5e/block`
-等 profile），请求里额外带 6 维 `tcp_pose`；`guodi`（20 维）/ `xinsong`
+等 profile），请求里额外带 6 维 `tcp_pose`；wr-wam 的 `ur5e_step23300`
+服务也返回 `(32, 7)` 绝对关节角，请求字段同样是 7 维 `state` + 6 维
+`tcp_pose` + 两路原始 RGB；`guodi`（20 维）/ `xinsong`
 （16 维）是多臂检查点，会被 7 维校验拦下；`flexiv` 虽是 7 维，但那是
 7 关节 Flexiv 臂，不是 UR5e 的 6 关节 + 夹爪。
 
@@ -56,8 +59,8 @@ uv run check-recording-ready \
   --check-robot-tcp
 ```
 
-`lingbot` / `pi05` / `flexpi` 用服务端自己的 `__ndarray__` 编码（纯
-msgpack，不是 msgpack-numpy）；`openwam` 用 `cv2` 编码 PNG。
+`lingbot` / `pi05` / `flexpi` / `wr-wam` 用服务端自己的 `__ndarray__` 编码
+（纯 msgpack，不是 msgpack-numpy）；`openwam` 用 `cv2` 编码 PNG。
 
 ---
 
@@ -108,6 +111,7 @@ FASTWAM_IMAGE_FIELDS = {...}
 PI05_IMAGE_FIELDS = {...}
 LINGBOT_IMAGE_FIELDS = {...}
 FLEXPI_IMAGE_FIELDS = {...}
+WRWAM_IMAGE_FIELDS = {...}
 OPENWAM_IMAGE_FIELDS = {...}
 ```
 
@@ -231,7 +235,7 @@ uv run ws-control \
 | 参数 | 说明 |
 | --- | --- |
 | `--config` | 运行配置，默认 `configs/hardware/ur5e_d455.yaml` |
-| `--model` | 协议：`json`、`fastwam`、`lingbot`、`openwam`、`pi05`（旧名 `openpi05`）、`flexpi`，覆盖 `vla.model` |
+| `--model` | 协议：`json`、`fastwam`、`lingbot`、`openwam`、`pi05`（旧名 `openpi05`）、`flexpi`、`wr-wam`（旧名 `wrwam`），覆盖 `vla.model` |
 | `--server-url` | 覆盖 `vla.server_url` |
 | `--api-key` | 覆盖 `vla.api_key` |
 | `--task` | 覆盖任务描述文本 |
@@ -557,6 +561,47 @@ metadata。UR5e 变体的请求体是 7 维关节状态加 6 维 `tcp_pose`：
 截取并把夹爪二值化为 0/1000 后下发。旧的 13 维 HS13 检查点面向 Flexiv
 机械臂，会被 7 维校验拦下。
 
+### 7.6 wr-wam（`--model wr-wam`）
+
+`ur5e_step23300_bf16` 交付服务的协议：WebSocket 地址为
+`ws://<host>:18005`（也支持 `wss://`，用 `--server-url` 指定）。连接后
+先收一条 metadata，之后每发一帧 msgpack 请求就回一帧动作块。数组编码与
+`flexpi` 相同，走服务端自己的 `__ndarray__`（与交付目录
+`serving/msgpack_numpy.py` 的编码一致）。服务端字段说明见交付目录的
+`serving/README_API.md`。
+
+| 请求字段 | 来源 |
+| --- | --- |
+| `state` | `obs["joint_positions"]`（6 关节角原始弧度 + 夹爪 0 闭合 / 1 打开，float32[7]） |
+| `tcp_pose` | `obs["tcp_pose"]`（xyz 米 + 旋转向量 rx/ry/rz，float32[6]） |
+| `images["cam_high"]` | `third_left_top_rgb`（原始 uint8 RGB，480×640） |
+| `images["cam_left_wrist"]` | `wrist_rgb`（原始 uint8 RGB，480×640） |
+| `prompt` | `task.file` 的 `task`，或 `--task` |
+
+服务端返回 `actions` 为 `float32[32, 7]`：每行 6 个绝对关节目标（rad）+ 1 个
+0~1 夹爪，已在服务端完成反归一化；客户端按 `vla.execute_horizon` 截取并把
+夹爪二值化为 0/1000 后下发。
+
+连接时客户端会用 metadata 校验字段契约：`state_dim=7`、`tcp_pose_dim=6`、
+`action_dim=7`、`camera_keys` 包含 `cam_high` 和 `cam_left_wrist`；`prompt`
+必须是 metadata 的 `prompts` 之一（当前三个任务的英文原文）。不一致会在
+机械臂移动前直接报错。服务端把异常以 JSON 文本帧返回（如
+`{"error": "..."}`），客户端会把 error 内容原样抛出。
+
+以交付目录为例（服务在 18005 端口）：
+
+```bash
+uv run ws-control \
+  --model wr-wam \
+  --server-url ws://192.168.1.100:18005 \
+  --task "Pick up the block from the table and place it in the box." \
+  --dry-run --max-steps 5
+```
+
+`server_url` 也可以用 `wss://`；需要鉴权时用 `--api-key`，客户端会带
+`Authorization: Api-Key <key>` 头。服务端每次返回 32 步整块：想整块执行完
+再重推就把 `vla.execute_horizon` 设为 32；保持 15 则只执行前 15 条后重推。
+
 ---
 
 ## 8. 常见问题
@@ -570,6 +615,8 @@ metadata。UR5e 变体的请求体是 7 维关节状态加 6 维 `tcp_pose`：
 | `expected 7-dim single-arm UR5 actions ..., got ...` | 返回动作不是 7 维（单臂 = 6 关节 + 夹爪）；加载了别的机器人/任务的检查点（如 13 维 HS13 Flex-π）。`--dry-run` 下只告警不停止 |
 | `policy response 'action' must be a list of 7-value actions` | `json`/`openwam` 返回维度不是 `N×7` |
 | `unexpected OpenWAM frame type` | 服务端没按 `ping → reset → obs` 的约定回复 |
+| `wr-wam task ... is not one of the server prompts` | 当前 `task.file` / `--task` 不是服务端 `prompts` 之一；换成 metadata 里的英文原文 |
+| `wr-wam server action_dim=...` | 服务端加载的不是 UR5e 7 维检查点，或 metadata 与客户端字段约定不一致 |
 | 夹爪不动作或方向相反 | 调整 `vla.threshold`（0~1 输出用 0.7，0~1000 输出用 500） |
 | 机械臂运动幅度过大 | 降低 `execute_horizon`、调小 `max_joint_delta`，并确认服务端输出绝对关节角 |
 | 终端无输出 | 检查是否停在 `press ENTER` 提示，或加 `--no-wait` |

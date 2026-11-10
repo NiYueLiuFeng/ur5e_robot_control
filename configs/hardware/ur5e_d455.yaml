@@ -97,20 +97,22 @@ vla:
   reset_on_start: true
   threshold: 0.7 ##0.7for block
   # ws-control 协议：json（默认）、fastwam、lingbot、openwam、
-  # pi05（旧名 openpi05）、flexpi。除 flexpi 外都输出 7 维绝对关节角；
-  # flexpi 只有 13 维 HS13 末端状态，只能配合 --dry-run 预览。
+  # pi05（旧名 openpi05）、flexpi、wr-wam（旧名 wrwam）。除 flexpi 和
+  # wr-wam 外都输出 7 维绝对关节角；这两个协议额外要求 6 维 tcp_pose。
   model: "json"
   # 动作下发帧率（Hz）。留空表示用协议默认值：json 跟随 robot.control_hz，
   # 其余模型按其训练帧率（15 Hz）下发。
   # action_hz: 15
   # 请求体里的 state / 图片字段固定在 src/apps/run_ws_control.py 的
   # IMAGE_FIELDS / FASTWAM_IMAGE_FIELDS / PI05_IMAGE_FIELDS /
-  # LINGBOT_IMAGE_FIELDS / FLEXPI_IMAGE_FIELDS / OPENWAM_IMAGE_FIELDS 常量里。
+  # LINGBOT_IMAGE_FIELDS / FLEXPI_IMAGE_FIELDS / WRWAM_IMAGE_FIELDS /
+  # OPENWAM_IMAGE_FIELDS 常量里。
   # 示例：
   # model: "fastwam"
   # model: "lingbot"
   # model: "openwam"
   # model: "pi05"
+  # model: "wr-wam"   # ur5e_step23300 服务，ws://<host>:18005
   #
   # openwam 走动作块（chunk）：客户端每次 obs 都带 "chunk": true，服务端一次
   # 回整块（ur5 检查点 = 32 步）。此时把 execute_horizon 设成 32 就会整块执行、
